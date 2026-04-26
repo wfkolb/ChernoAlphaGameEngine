@@ -1,0 +1,47 @@
+# Build output
+build/
+out/
+bin/
+lib/
+
+# vcpkg installed packages (reproduced by vcpkg on configure)
+vcpkg_installed/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.vcxproj.filters
+
+# Compiled objects & binaries
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Compiled shaders
+*.cso
+*.fxo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temp asset files (SpinDemo writes here)
+*.easset
