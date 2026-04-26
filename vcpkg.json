@@ -1,0 +1,17 @@
+{
+  "name": "engine",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "directx-headers",
+    "meshoptimizer",
+    "cgltf",
+    { "name": "directx-dxc", "host": true },
+    {
+      "name": "imgui",
+      "features": ["dx12-binding", "win32-binding"]
+    },
+    "gtest",
+    "benchmark",
+    "tomlplusplus"
+  ]
+}

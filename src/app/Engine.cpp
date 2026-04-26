@@ -1,0 +1,111 @@
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include "app/Engine.h"
+#include "tools/Logger.h"
+#include "tools/Config.h"
+#include "networking/WinsockGuard.h"
+#include "core/Input.h"
+#include "core/log.h"
+#include <core/ecs/Name.h>
+
+namespace engine::app {
+
+struct Engine::WinsockGuardHolder {
+    engine::networking::WinsockGuard guard;
+};
+
+Engine::Engine() = default;
+
+Engine::~Engine() {
+    if (initialized_) shutdown();
+}
+
+bool Engine::init(const EngineConfig& cfg) {
+    // 1. Config
+    engine::tools::Config::init();
+
+    // 2. Logger
+    engine::tools::Logger::init();
+    LOG_INFO("Engine init begin");
+
+    // 3. Winsock
+    winsockGuard_ = std::make_unique<WinsockGuardHolder>();
+
+    // 4. ECS + EventBus — register built-in components before creating any world
+    core::ecs::World::registerComponent<core::ecs::Name>({
+        "Name",
+        sizeof(core::ecs::Name),
+        alignof(core::ecs::Name),
+        [](void* ptr) { new(ptr) core::ecs::Name{}; },
+        nullptr,
+        nullptr
+    });
+    world_    = std::make_unique<core::ecs::World>();
+    eventBus_ = std::make_unique<core::EventBus>();
+
+    // 5. Window
+    rendering::Window::Desc wdesc;
+    wdesc.width  = cfg.windowWidth;
+    wdesc.height = cfg.windowHeight;
+    wdesc.title  = cfg.windowTitle;
+    window_ = std::make_unique<WindowHolder>(WindowHolder{ rendering::Window::create(wdesc) });
+
+    // 6. GpuDevice
+    rendering::GpuDevice::Desc ddesc;
+    ddesc.window = &win();
+    ddesc.vsync  = cfg.vsync;
+    device_ = std::make_unique<GpuDeviceHolder>(GpuDeviceHolder{ rendering::GpuDevice::create(ddesc) });
+
+    // 7. FrameGraph
+    frameGraph_ = std::make_unique<rendering::FrameGraph>();
+
+    // 8. RawInput
+    core::InputSystem::registerRawInput(win().nativeHandle());
+
+    initialized_ = true;
+    LOG_INFO("Engine init complete ({} x {})", cfg.windowWidth, cfg.windowHeight);
+    return true;
+}
+
+void Engine::run(std::function<void(core::ecs::World&, rendering::FrameGraph&)> onTick) {
+    while (!win().wantsClose()) {
+        // Drain the Win32 message queue.
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_INPUT) {
+                core::InputSystem::processRawInput(reinterpret_cast<void*>(msg.lParam));
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        core::InputSystem::update();
+
+        dev().beginFrame();
+        frameGraph_->reset();
+
+        if (onTick) onTick(*world_, *frameGraph_);
+
+        frameGraph_->compile();
+        frameGraph_->execute(dev().nativeCommandList());
+
+        dev().endFrame();
+    }
+}
+
+void Engine::shutdown() {
+    if (!initialized_) return;
+    LOG_INFO("Engine shutdown");
+    dev().flush();
+    frameGraph_.reset();
+    device_.reset();
+    window_.reset();
+    world_.reset();
+    eventBus_.reset();
+    winsockGuard_.reset();
+    engine::tools::Logger::shutdown();
+    engine::tools::Config::shutdown();
+    initialized_ = false;
+}
+
+} // namespace engine::app

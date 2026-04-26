@@ -1,0 +1,154 @@
+================================================================================
+ENGINE PROJECT — REPROMPT  (last updated 2026-04-26)
+================================================================================
+
+PROJECT OVERVIEW
+----------------
+A Windows DX12/C++20 3D game engine built by a 5-agent team:
+  Team Leader | Rendering Lead | Networking Lead | Tools Lead | Test Lead
+Root: C:\Users\wfkol\claude-teamtest\engine\
+
+CURRENT STATUS: ALL 5 PHASES COMPLETE. SpinDemo is WORKING (spinning cube
+with flat normals-as-colour shading confirmed on-screen 2026-04-26).
+
+--------------------------------------------------------------------------------
+BUILD & RUN
+--------------------------------------------------------------------------------
+Configure (first time or after CMakeLists changes):
+  cmake --preset debug
+
+Build everything:
+  cmake --build --preset build-debug
+
+Build a specific target:
+  cmake --build --preset build-debug --target SpinDemo
+  cmake --build --preset build-debug --target ClearDemo
+
+Run SpinDemo (spinning cube demo):
+  build\debug\src\demos\Debug\SpinDemo.exe [optional-path-to.glb]
+
+Run ClearDemo (minimal green-screen sanity test):
+  build\debug\src\demos\Debug\ClearDemo.exe
+
+Run unit tests:
+  cd build\debug && ctest -L unit --output-on-failure
+
+Run integration tests (requires physical GPU + display):
+  cd build\debug && ctest -L integration --output-on-failure
+
+--------------------------------------------------------------------------------
+TECH STACK
+--------------------------------------------------------------------------------
+- C++20, MSVC v143, CMake 3.26+ with presets, vcpkg manifest mode
+- DirectX 12 (sole backend); DXC (directx-dxc via vcpkg) for HLSL → .cso
+- Custom math library: RH, Y-up, row-major Mat4
+  - Row-vector convention: v' = v * M in C++, mul(v, M) in HLSL
+  - lookAtRh: camera +Z points BACKWARD (eye - target); objects in front
+    have NEGATIVE view-space z. perspectiveRhYupReverseZ expects this.
+  - HLSL cbuffer matrices MUST use `row_major float4x4` — without it HLSL
+    transposes the data and transforms are completely wrong.
+- Reverse-Z depth: near=1, far=0; DepthFunc=GREATER_EQUAL; clear to 0.0f
+- Winsock2 UDP + custom reliability layer (networking)
+- Archetype-based ECS
+- Third-party (approved): DirectXMath, DXC, WinPixEventRuntime, stb_image,
+  meshoptimizer, cgltf, Dear ImGui (docking branch), GTest 1.14+, GBenchmark
+
+--------------------------------------------------------------------------------
+MODULE STRUCTURE
+--------------------------------------------------------------------------------
+src/
+  core/          → math, ECS, input, logging, config (engine::core)
+  rendering/     → DX12 backend, FrameGraph, MeshManager, Camera (engine::rendering)
+  networking/    → UDP transport, session management (engine::networking)
+  tools/         → AssetImporter (cgltf), EassetLoader, asset cooker (engine::tools)
+  app/           → Engine main class (engine::app)
+  demos/         → SpinDemo.exe, ClearDemo.exe (application binaries)
+tests/
+  core/          → unit + ecs tests
+  rendering/     → integration + GPU benchmark
+  tools/         → EassetLoader unit tests
+  networking/    → networking unit tests
+  demos/         → SpinDemo integration tests
+  benchmarks/    → core, networking, tools benchmarks
+
+--------------------------------------------------------------------------------
+PHASE COMPLETION
+--------------------------------------------------------------------------------
+Phase 1 — Planning docs:         COMPLETE
+Phase 2 — Design docs (#6–16):   COMPLETE  (11 docs in engine/docs/)
+Phase 3 — Code (#17–38):         COMPLETE
+Phase 4 — Integration (#40–43):  COMPLETE
+Post-Phase 4 gaps (6 items):      ALL RESOLVED
+Phase 5 — SpinDemo (#44–48):     COMPLETE  ← confirmed working 2026-04-26
+
+Phase 5 tasks:
+  #44  loadEasset() → CpuMesh; tools CMake gained PUBLIC engine::rendering
+  #45  FlatShadeVS/PS.hlsl + FlatShadePipeline; DXC CMake rules (optional)
+  #46  addFlatShadePass(fg, mm, mesh, pipeline, mvp, bb, db, w, h)
+  #47  SpinDemo exe; nativeDepthBuffer() added to GpuDevice
+  #48  7 unit tests (115 total) + 2 integration tests in tests/demos/
+
+Test count: 115 unit tests / 2 integration tests (demos) / GPU benchmarks
+
+--------------------------------------------------------------------------------
+KNOWN API DEVIATIONS FROM DESIGN DOCS
+--------------------------------------------------------------------------------
+1. MeshManager must be constructed AFTER beginFrame() — it captures the open
+   command list at construction time. Upload pattern:
+     device.beginFrame();
+     MeshManager meshMgr(device);
+     MeshHandle h = meshMgr.uploadStatic(verts, indices);
+     device.endFrame();   // submits copy commands
+     device.flush();      // waits for GPU
+
+2. Quat::fromAxisAngle is a FREE FUNCTION, not a method.
+   Use: engine::core::math::fromAxisAngle(axis, angle)
+
+3. Mat4 has no .data() method — use &mvp.m[0][0] to get float* pointer.
+
+4. FlatShadePass API requires width+height explicitly (not derived from FB).
+
+5. addFlatShadePass requires MeshHandle (not raw buffer handles).
+
+6. SpinDemo uses integer DXGI_FORMAT values (87 = R8G8B8A8_UNORM,
+   20 = D32_FLOAT) to avoid exposing DX12 headers in the demo.
+
+7. lookAtRh is STANDARD RH (camera +Z backward, objects in front at -z_view),
+   NOT the "+Z forward" convention the original design comment implied.
+   cameraViewMatrix passes forward = rotate(q, {0,0,-1}) as target offset.
+
+8. All HLSL cbuffer matrices must be declared `row_major float4x4`.
+   Without this, HLSL transposes the data → wrong vertex transforms.
+
+--------------------------------------------------------------------------------
+CRITICAL BUG HISTORY (fixed, but important for future work)
+--------------------------------------------------------------------------------
+BUG A — Double barrier crash:
+  FrameGraph post-execute loop AND endFrame() both emitted RT→PRESENT barrier.
+  Fix: added `if (vr.isBackBuffer) continue;` in FrameGraph post-execute loop.
+
+BUG B — MeshManager on closed command list:
+  MeshManager captures the command list at construction. Constructing it before
+  any beginFrame() captured a closed list → upload commands never submitted →
+  GPU buffers uninitialized → no geometry. See API deviation #1 above.
+
+BUG C — lookAtRh wrong zAxis sign:
+  `zAxis = normalize(target - eye)` gave positive z_view for in-front objects.
+  Projection has w = -z_view → negative w → hardware clips everything silently.
+  Fix: `zAxis = normalize(eye - target)` in Mat.cpp.
+
+BUG D — HLSL missing row_major:
+  `float4x4 gMVP` without `row_major` makes HLSL read the data transposed.
+  Translation lands in wrong axis; transforms are completely wrong.
+  Fix: `row_major float4x4 gMVP` in FlatShadeVS.hlsl.
+
+--------------------------------------------------------------------------------
+NEXT STEPS (suggested Phase 6 directions)
+--------------------------------------------------------------------------------
+- PBR lighting pass (replace flat shading with physically-based shading)
+- Texture loading (stb_image → GPU upload pipeline)
+- Multiple mesh / scene graph rendering
+- ImGui overlay (frame time display, camera controls)
+- glTF scene loading (multiple meshes, materials, transforms)
+- Full camera controller (FpsCameraController already implemented in Camera.cpp)
+================================================================================
