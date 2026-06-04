@@ -49,6 +49,8 @@ namespace engine::rendering {
         void* nativeDevice()          const noexcept;
         // Returns ID3D12GraphicsCommandList* for the current frame as void*.
         void* nativeCommandList()     const noexcept;
+        // Returns ID3D12CommandQueue* (direct queue) as void*. For ImGui DX12 backend init only.
+        void* nativeCommandQueue()    const noexcept;
 
         // Returns the D3D12_CPU_DESCRIPTOR_HANDLE.ptr for the current back buffer's RTV.
         uint64_t currentBackBufferRtvHandle() const noexcept;

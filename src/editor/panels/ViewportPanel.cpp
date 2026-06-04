@@ -10,6 +10,7 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -41,13 +42,53 @@ float snapTo(float value, float step) {
     if (step <= 0.0f) return value;
     return std::round(value / step) * step;
 }
+
+// Draws a world-space line segment with near-plane clipping so lines that
+// straddle the camera plane still appear (rather than being silently dropped).
+void drawClippedLine(ImDrawList* dl,
+                     const Vec3& a, const Vec3& b,
+                     const core::math::Mat4& viewProj,
+                     float originX, float originY, float w, float h,
+                     ImU32 col, float thickness = 1.0f) {
+    Vec4 ca = Vec4{a, 1.0f} * viewProj;
+    Vec4 cb = Vec4{b, 1.0f} * viewProj;
+
+    constexpr float kNear = 0.0001f;
+    if (ca.w <= kNear && cb.w <= kNear) return;
+
+    if (ca.w <= kNear) {
+        float t = (kNear - ca.w) / (cb.w - ca.w);
+        ca.x += t * (cb.x - ca.x);
+        ca.y += t * (cb.y - ca.y);
+        ca.w  = kNear;
+    } else if (cb.w <= kNear) {
+        float t = (kNear - cb.w) / (ca.w - cb.w);
+        cb.x += t * (ca.x - cb.x);
+        cb.y += t * (ca.y - cb.y);
+        cb.w  = kNear;
+    }
+
+    auto toScreen = [&](const Vec4& c) -> ImVec2 {
+        float nx = c.x / c.w, ny = c.y / c.w;
+        return { originX + (nx * 0.5f + 0.5f) * w,
+                 originY + (1.0f - (ny * 0.5f + 0.5f)) * h };
+    };
+
+    dl->AddLine(toScreen(ca), toScreen(cb), col, thickness);
+}
 }
 
 void ViewportPanel::handleCameraInput(EditorCamera& camera, bool hovered) {
     ImGuiIO& io = ImGui::GetIO();
 
+    // Start camera drag only when right-click originates inside the viewport.
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        cameraRightDragging_ = true;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right))
+        cameraRightDragging_ = false;
+
     EditorCamera::Input in{};
-    in.rightMouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Right) && (hovered || dragging_);
+    in.rightMouseDown = cameraRightDragging_;
     in.altDown        = io.KeyAlt;
     in.mouseDeltaX    = io.MouseDelta.x;
     in.mouseDeltaY    = io.MouseDelta.y;
@@ -162,17 +203,12 @@ void ViewportPanel::drawOverlays(core::ecs::World& world, const Mat4& viewProj) 
         const ImU32 gridCol = IM_COL32(120, 120, 120, 90);
         const int   half    = 10;
         for (int i = -half; i <= half; ++i) {
-            ImVec2 a, b;
             const float f = static_cast<float>(i);
             const float e = static_cast<float>(half);
-            if (worldToScreen(Vec3{f, 0, -e}, viewProj, originX_, originY_, contentWidth_, contentHeight_, a) &&
-                worldToScreen(Vec3{f, 0,  e}, viewProj, originX_, originY_, contentWidth_, contentHeight_, b)) {
-                dl->AddLine(a, b, gridCol, 1.0f);
-            }
-            if (worldToScreen(Vec3{-e, 0, f}, viewProj, originX_, originY_, contentWidth_, contentHeight_, a) &&
-                worldToScreen(Vec3{ e, 0, f}, viewProj, originX_, originY_, contentWidth_, contentHeight_, b)) {
-                dl->AddLine(a, b, gridCol, 1.0f);
-            }
+            drawClippedLine(dl, Vec3{f, 0, -e}, Vec3{f, 0,  e},
+                            viewProj, originX_, originY_, contentWidth_, contentHeight_, gridCol);
+            drawClippedLine(dl, Vec3{-e, 0, f}, Vec3{ e, 0, f},
+                            viewProj, originX_, originY_, contentWidth_, contentHeight_, gridCol);
         }
     }
 
@@ -202,6 +238,57 @@ void ViewportPanel::drawOverlays(core::ecs::World& world, const Mat4& viewProj) 
             };
             for (auto& ed : edges) dl->AddLine(s[ed[0]], s[ed[1]], bbCol, 1.0f);
         });
+    }
+}
+
+void ViewportPanel::drawOrientationWidget(const core::math::Mat4& view) {
+    constexpr float kSize   = 80.0f;
+    constexpr float kMargin = 12.0f;
+    constexpr float kArm    = kSize * 0.36f;
+    constexpr float kDotR   = 4.5f;
+
+    const float cx = originX_ + contentWidth_  - kMargin - kSize * 0.5f;
+    const float cy = originY_ + contentHeight_ - kMargin - kSize * 0.5f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled({cx, cy}, kSize * 0.5f, IM_COL32(28, 28, 32, 160));
+
+    struct AxisDesc { float x, y, z; ImU32 col; const char* label; };
+    AxisDesc axes[3] = {
+        { 1, 0, 0, IM_COL32(230,  70,  70, 255), "X" },
+        { 0, 1, 0, IM_COL32( 70, 220,  70, 255), "Y" },
+        { 0, 0, 1, IM_COL32( 80, 120, 240, 255), "Z" },
+    };
+
+    // Project a world direction through the view rotation (ignore translation).
+    // Row-vector convention: result = dir * view (upper 3x3 only).
+    // view-space x = dot(dir, column 0 of upper 3x3) = m[0][0]*dx + m[1][0]*dy + m[2][0]*dz
+    auto project = [&](float dx, float dy, float dz) -> ImVec2 {
+        float sx =   dx * view.m[0][0] + dy * view.m[1][0] + dz * view.m[2][0];
+        float sy = -(dx * view.m[0][1] + dy * view.m[1][1] + dz * view.m[2][1]); // flip Y
+        return { cx + sx * kArm, cy + sy * kArm };
+    };
+
+    // Sort by view-space Z: largest Z (furthest behind camera) drawn first.
+    // view-space z = m[0][2]*dx + m[1][2]*dy + m[2][2]*dz
+    int order[3] = {0, 1, 2};
+    float depths[3];
+    for (int i = 0; i < 3; ++i)
+        depths[i] = axes[i].x * view.m[0][2] + axes[i].y * view.m[1][2] + axes[i].z * view.m[2][2];
+    std::sort(order, order + 3, [&](int a, int b) { return depths[a] > depths[b]; });
+
+    for (int oi = 0; oi < 3; ++oi) {
+        const auto& ax  = axes[order[oi]];
+        ImVec2 tip = project( ax.x,  ax.y,  ax.z);
+        ImVec2 neg = project(-ax.x, -ax.y, -ax.z);
+
+        // Negative half-axis — dim.
+        ImU32 dimCol = (ax.col & 0x00FFFFFFu) | 0x55000000u;
+        dl->AddLine({cx, cy}, neg, dimCol, 1.5f);
+
+        dl->AddLine({cx, cy}, tip, ax.col, 2.5f);
+        dl->AddCircleFilled(tip, kDotR, ax.col);
+        dl->AddText({tip.x + 5.0f, tip.y - 7.0f}, ax.col, ax.label);
     }
 }
 
@@ -288,6 +375,7 @@ void ViewportPanel::draw(core::ecs::World& world,
     if (world.isAlive(selected)) {
         drawGizmo(world, selected, viewProj, undo);
     }
+    drawOrientationWidget(view);
 
     ImGui::End();
 }

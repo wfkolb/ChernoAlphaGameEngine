@@ -98,7 +98,7 @@ static void openLogFilePart()
         std::fclose(logFile_);
         logFile_ = nullptr;
     }
-    _wfopen_s(&logFile_, path.c_str(), L"at,ccs=UTF-8");
+    _wfopen_s(&logFile_, path.c_str(), L"at");
 }
 
 static void maybeRotate()

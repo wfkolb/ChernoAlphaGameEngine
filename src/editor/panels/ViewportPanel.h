@@ -62,6 +62,7 @@ private:
                    UndoStack& undo);
     void drawOverlays(core::ecs::World& world,
                       const core::math::Mat4& viewProj);
+    void drawOrientationWidget(const core::math::Mat4& view);
 
     Overlays overlays_;
     GizmoOp  gizmoOp_      = GizmoOp::Translate;
@@ -77,8 +78,12 @@ private:
     bool  focused_       = false;
 
     // Gizmo drag state (one drag => one undo command).
-    bool            dragging_ = false;
+    bool            dragging_            = false;
     core::Transform dragStart_{};
+
+    // Camera drag state — stays true while right mouse is held, even after the
+    // cursor leaves the viewport item rect.
+    bool            cameraRightDragging_ = false;
 };
 
 } // namespace engine::editor

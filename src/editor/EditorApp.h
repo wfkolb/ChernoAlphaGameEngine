@@ -46,6 +46,7 @@ public:
     void shutdown();
 
 private:
+    void registerComponentWidgets();  // ImGui editors for built-in component types
     void loadPreferences();           // project.toml + editor_prefs.toml
     void buildDockLayout();
     void drawMenuBar();        // wraps items in Begin/EndMenuBar (dock host)

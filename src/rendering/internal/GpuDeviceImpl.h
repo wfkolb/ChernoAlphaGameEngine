@@ -56,6 +56,8 @@ struct GpuDevice::Impl {
     bool                          tearingSupported = false;
     bool                          dxrSupported     = false;
 
+    const rendering::Window*      window           = nullptr;
+
     ComPtr<ID3D12Debug1>          debugController;
 };
 

@@ -6,6 +6,7 @@
 #include <d3d12.h>
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_dx12.h>
 #include <imgui_impl_win32.h>
 
@@ -21,13 +22,19 @@
 #include <core/ecs/Name.h>
 #include <core/components/Transform.h>
 #include <core/components/Health.h>
+#include <core/components/Lifetime.h>
+#include <core/components/TeamTag.h>
 
 #include <tools/Config.h>
+#include <tools/Logger.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
-// ImGui_ImplWin32_WndProcHandler is declared in imgui_impl_win32.h (included
-// above) — no local re-declaration needed.
+// imgui_impl_win32.h guards this declaration in #if 0 to avoid pulling in
+// <windows.h>. Forward-declare it here per imgui's documented usage pattern.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace engine::editor {
 
@@ -58,6 +65,8 @@ struct EditorApp::Gpu {
     std::unique_ptr<rendering::GpuDevice> device;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> imguiHeap;
+    uint32_t imguiDescSize      = 0;
+    uint32_t imguiNextDescSlot  = 0;
     bool imguiInitialized = false;
 
     ~Gpu() {
@@ -73,11 +82,16 @@ EditorApp::EditorApp() = default;
 EditorApp::~EditorApp() { shutdown(); }
 
 bool EditorApp::init() {
+    tools::Logger::init(::engine::core::log::LogLevel::Trace);
+    LOG_INFO("EngineEditor init started");
+
     gpu_ = std::make_unique<Gpu>();
 
     if (!rendering::GpuDevice::isAvailable()) {
-        return false;   // headless / no DX12 — cannot run the editor.
+        LOG_ERROR("No DX12-capable device found (headless?). Editor cannot start.");
+        return false;
     }
+    LOG_INFO("DX12 device available");
 
     // --- Window ---
     rendering::Window window = rendering::Window::create({
@@ -86,6 +100,7 @@ bool EditorApp::init() {
         .title  = L"EngineEditor",
     });
     gpu_->window = std::make_unique<rendering::Window>(std::move(window));
+    LOG_INFO("Window created ({}x{})", kWidth, kHeight);
 
     HWND hwnd = static_cast<HWND>(gpu_->window->nativeHandle());
 
@@ -95,9 +110,11 @@ bool EditorApp::init() {
         .vsync  = true,
     });
     if (!device.isValid()) {
+        LOG_ERROR("GpuDevice creation failed (swapchain error?)");
         return false;
     }
     gpu_->device = std::make_unique<rendering::GpuDevice>(std::move(device));
+    LOG_INFO("GpuDevice created");
 
     auto* d3dDevice = static_cast<ID3D12Device*>(gpu_->device->nativeDevice());
 
@@ -108,9 +125,13 @@ bool EditorApp::init() {
         hd.NumDescriptors = 64;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(d3dDevice->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&gpu_->imguiHeap)))) {
+            LOG_ERROR("Failed to create ImGui descriptor heap");
             return false;
         }
+        gpu_->imguiDescSize = d3dDevice->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
+    LOG_INFO("ImGui descriptor heap created");
 
     // --- ImGui ---
     IMGUI_CHECKVERSION();
@@ -118,33 +139,61 @@ bool EditorApp::init() {
     ImGuiIO& io = ImGui::GetIO();
 #ifdef IMGUI_HAS_DOCK
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    LOG_TRACE("ImGui docking enabled");
+#else
+    LOG_WARN("ImGui built without docking support (IMGUI_HAS_DOCK not defined)");
 #endif
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
     ImGui_ImplWin32_Init(hwnd);
+    LOG_INFO("ImGui Win32 backend initialized");
 
     // Subclass the window's WndProc so ImGui receives input. The original proc
     // (which tracks resize/close) is chained after ImGui.
     g_originalWndProc = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&EditorWndProc)));
 
-    const D3D12_CPU_DESCRIPTOR_HANDLE cpu = gpu_->imguiHeap->GetCPUDescriptorHandleForHeapStart();
-    const D3D12_GPU_DESCRIPTOR_HANDLE gpu = gpu_->imguiHeap->GetGPUDescriptorHandleForHeapStart();
-    ImGui_ImplDX12_Init(
-        d3dDevice,
-        static_cast<int>(rendering::GpuDevice::kMaxFramesInFlight),
-        DXGI_FORMAT_R8G8B8A8_UNORM,
-        gpu_->imguiHeap.Get(),
-        cpu, gpu);
+    // ImGui 1.91.5+ uses ImGui_ImplDX12_InitInfo. The backend sets
+    // RendererHasTextures (requires CommandQueue) so font atlas uploads
+    // happen automatically inside NewFrame — no manual CreateFontsTexture needed.
+    {
+        Gpu* gpuPtr = gpu_.get();
+        ImGui_ImplDX12_InitInfo dx12Info = {};
+        dx12Info.Device           = d3dDevice;
+        dx12Info.CommandQueue     = static_cast<ID3D12CommandQueue*>(gpu_->device->nativeCommandQueue());
+        dx12Info.NumFramesInFlight = static_cast<int>(rendering::GpuDevice::kMaxFramesInFlight);
+        dx12Info.RTVFormat        = DXGI_FORMAT_R8G8B8A8_UNORM;
+        dx12Info.DSVFormat        = DXGI_FORMAT_UNKNOWN;
+        dx12Info.SrvDescriptorHeap = gpu_->imguiHeap.Get();
+        dx12Info.UserData         = gpuPtr;
+        dx12Info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info,
+                                           D3D12_CPU_DESCRIPTOR_HANDLE* outCpu,
+                                           D3D12_GPU_DESCRIPTOR_HANDLE* outGpu) {
+            auto* g   = static_cast<Gpu*>(info->UserData);
+            uint32_t slot = g->imguiNextDescSlot++;
+            outCpu->ptr = g->imguiHeap->GetCPUDescriptorHandleForHeapStart().ptr
+                          + static_cast<SIZE_T>(slot) * g->imguiDescSize;
+            outGpu->ptr = g->imguiHeap->GetGPUDescriptorHandleForHeapStart().ptr
+                          + static_cast<UINT64>(slot) * g->imguiDescSize;
+        };
+        dx12Info.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE,
+                                          D3D12_GPU_DESCRIPTOR_HANDLE) {
+            // Bump allocator — slots are never individually freed in the editor.
+        };
+        ImGui_ImplDX12_Init(&dx12Info);
+    }
+    LOG_INFO("ImGui DX12 backend initialized");
 
     gpu_->imguiInitialized = true;
 
     // --- Editor state ---
     inspectorPanel_ = std::make_unique<InspectorPanel>(componentRegistry_);
+    registerComponentWidgets();
     loadPreferences();
     newScene();
 
+    LOG_INFO("EngineEditor init complete");
     running_ = true;
     return true;
 }
@@ -214,6 +263,37 @@ void EditorApp::buildDockLayout() {
 
     const ImGuiID dockId = ImGui::GetID("EditorDockSpace");
     ImGui::DockSpace(dockId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+
+    if (!dockBuilt_) {
+        dockBuilt_ = true;
+
+        ImGui::DockBuilderRemoveNode(dockId);
+        ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetMainViewport()->WorkSize);
+
+        // Split bottom strip (25%) for Assets + Console.
+        ImGuiID topId, bottomId;
+        ImGui::DockBuilderSplitNode(dockId,  ImGuiDir_Down, 0.25f, &bottomId, &topId);
+
+        // Split top row: left sidebar (20%), then right sidebar (25% of remainder).
+        ImGuiID leftId, midRightId;
+        ImGui::DockBuilderSplitNode(topId,   ImGuiDir_Left, 0.20f, &leftId,   &midRightId);
+
+        ImGuiID centerId, rightId;
+        ImGui::DockBuilderSplitNode(midRightId, ImGuiDir_Right, 0.25f, &rightId, &centerId);
+
+        // Split bottom row: Assets (left 50%) + Console (right 50%).
+        ImGuiID assetsId, consoleId;
+        ImGui::DockBuilderSplitNode(bottomId, ImGuiDir_Left, 0.5f, &assetsId, &consoleId);
+
+        ImGui::DockBuilderDockWindow("Hierarchy", leftId);
+        ImGui::DockBuilderDockWindow("Viewport",  centerId);
+        ImGui::DockBuilderDockWindow("Inspector", rightId);
+        ImGui::DockBuilderDockWindow("Assets",    assetsId);
+        ImGui::DockBuilderDockWindow("Console",   consoleId);
+
+        ImGui::DockBuilderFinish(dockId);
+    }
 
     drawMenuBar();
 
@@ -350,6 +430,79 @@ void EditorApp::shutdown() {
     pie_.stop();
     tools::Config::shutdown();
     gpu_.reset();   // tears down ImGui + device + window in Gpu::~Gpu
+    LOG_INFO("EngineEditor shutdown complete");
+    tools::Logger::shutdown();
+}
+
+void EditorApp::registerComponentWidgets() {
+    using namespace core::math;
+    constexpr float kRad2Deg = 180.0f / 3.14159265358979f;
+    constexpr float kDeg2Rad = 3.14159265358979f / 180.0f;
+
+    // Transform: position (drag), rotation (Euler degrees via YXZ decomposition), scale (drag).
+    componentRegistry_.registerWidget(core::Transform::kComponentId, [=](void* data) -> bool {
+        auto* tr = static_cast<core::Transform*>(data);
+        bool changed = false;
+
+        float pos[3] = { tr->position.x, tr->position.y, tr->position.z };
+        if (ImGui::DragFloat3("Position", pos, 0.05f)) {
+            tr->position = Vec3{ pos[0], pos[1], pos[2] };
+            changed = true;
+        }
+
+        // Decompose quaternion → YXZ Euler angles (yaw/pitch/roll) for editing.
+        // Derivation: toMat4 gives M[2][1]=-sin(p), M[2][0]=sin(y)*cos(p), M[2][2]=cos(y)*cos(p).
+        const Mat4 rm    = toMat4(tr->rotation);
+        const float sinP = -rm.m[2][1];
+        const float pitch = std::asin(std::clamp(sinP, -1.0f, 1.0f));
+        const float cp    = std::cos(pitch);
+        const float yaw  = cp > 0.0001f ? std::atan2(rm.m[2][0], rm.m[2][2]) : std::atan2(-rm.m[0][2], rm.m[0][0]);
+        const float roll = cp > 0.0001f ? std::atan2(rm.m[0][1], rm.m[1][1]) : 0.0f;
+        float euler[3] = { yaw * kRad2Deg, pitch * kRad2Deg, roll * kRad2Deg };
+        if (ImGui::DragFloat3("Rotation", euler, 0.5f)) {
+            tr->rotation = fromEulerYxz(euler[0] * kDeg2Rad, euler[1] * kDeg2Rad, euler[2] * kDeg2Rad);
+            changed = true;
+        }
+
+        float scl[3] = { tr->scale.x, tr->scale.y, tr->scale.z };
+        if (ImGui::DragFloat3("Scale", scl, 0.01f, 0.0001f, 10000.0f)) {
+            tr->scale = Vec3{ scl[0], scl[1], scl[2] };
+            changed = true;
+        }
+        return changed;
+    });
+
+    // Health: current/max HP (clamped to [0, max]) and shield fraction shown as %.
+    componentRegistry_.registerWidget(core::Health::kComponentId, [](void* data) -> bool {
+        auto* h = static_cast<core::Health*>(data);
+        bool changed = false;
+        changed |= ImGui::DragFloat("Max HP",     &h->maxHp,     1.0f, 0.0f, 100000.0f);
+        h->currentHp = std::clamp(h->currentHp, 0.0f, h->maxHp);
+        changed |= ImGui::DragFloat("Current HP", &h->currentHp, 1.0f, 0.0f, h->maxHp);
+        float shieldPct = h->shieldPercent * 100.0f;
+        if (ImGui::SliderFloat("Shield %", &shieldPct, 0.0f, 100.0f, "%.1f%%")) {
+            h->shieldPercent = shieldPct / 100.0f;
+            changed = true;
+        }
+        return changed;
+    });
+
+    // Lifetime: seconds remaining before the entity is destroyed.
+    componentRegistry_.registerWidget(core::Lifetime::kComponentId, [](void* data) -> bool {
+        auto* l = static_cast<core::Lifetime*>(data);
+        return ImGui::DragFloat("Remaining (s)", &l->remaining, 0.1f, 0.0f, 86400.0f, "%.2f s");
+    });
+
+    // TeamTag: uint8 team ID (clamped 0–255).
+    componentRegistry_.registerWidget(core::TeamTag::kComponentId, [](void* data) -> bool {
+        auto* t = static_cast<core::TeamTag*>(data);
+        int teamId = t->teamId;
+        if (ImGui::InputInt("Team ID", &teamId)) {
+            t->teamId = static_cast<uint8_t>(std::clamp(teamId, 0, 255));
+            return true;
+        }
+        return false;
+    });
 }
 
 } // namespace engine::editor

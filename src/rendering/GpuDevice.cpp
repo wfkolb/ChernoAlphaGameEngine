@@ -49,7 +49,8 @@ bool GpuDevice::isAvailable() {
 GpuDevice GpuDevice::create(const Desc& desc) {
     auto impl = std::make_unique<Impl>();
 
-    impl->vsync = desc.vsync;
+    impl->vsync  = desc.vsync;
+    impl->window = desc.window;
 
 #if !defined(NDEBUG)
     {
@@ -251,6 +252,69 @@ GpuDevice GpuDevice::create(const Desc& desc) {
 
 void GpuDevice::beginFrame() {
     if (!impl_->valid) return;
+
+    // Resize swapchain if the OS window dimensions have changed.
+    if (impl_->window) {
+        const uint32_t nw = impl_->window->clientWidth();
+        const uint32_t nh = impl_->window->clientHeight();
+        if (nw > 0 && nh > 0 &&
+            (nw != impl_->backBufferWidth || nh != impl_->backBufferHeight)) {
+            // Drain GPU before releasing resources.
+            ++impl_->fenceCounter;
+            impl_->directQueue->Signal(impl_->fence.Get(), impl_->fenceCounter);
+            if (impl_->fence->GetCompletedValue() < impl_->fenceCounter) {
+                impl_->fence->SetEventOnCompletion(impl_->fenceCounter, impl_->fenceEvent);
+                WaitForSingleObjectEx(impl_->fenceEvent, INFINITE, FALSE);
+            }
+
+            for (uint32_t i = 0; i < kBackBufferCount; ++i)
+                impl_->backBuffers[i].Reset();
+            impl_->depthBuffer.Reset();
+
+            UINT scFlags = impl_->tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+            ENGINE_HR(impl_->swapChain->ResizeBuffers(0, nw, nh, DXGI_FORMAT_UNKNOWN, scFlags));
+
+            impl_->backBufferWidth  = nw;
+            impl_->backBufferHeight = nh;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = impl_->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            for (uint32_t i = 0; i < kBackBufferCount; ++i) {
+                ENGINE_HR(impl_->swapChain->GetBuffer(i, IID_PPV_ARGS(&impl_->backBuffers[i])));
+                impl_->device->CreateRenderTargetView(impl_->backBuffers[i].Get(), nullptr, rtvHandle);
+                rtvHandle.ptr += impl_->rtvDescSize;
+            }
+
+            D3D12_HEAP_PROPERTIES hp  = {};
+            hp.Type                   = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC dd    = {};
+            dd.Dimension              = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            dd.Width                  = nw;
+            dd.Height                 = nh;
+            dd.DepthOrArraySize       = 1;
+            dd.MipLevels              = 1;
+            dd.Format                 = DXGI_FORMAT_D32_FLOAT;
+            dd.SampleDesc             = { 1, 0 };
+            dd.Layout                 = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+            dd.Flags                  = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            D3D12_CLEAR_VALUE cv      = {};
+            cv.Format                 = DXGI_FORMAT_D32_FLOAT;
+            cv.DepthStencil.Depth     = 1.0f;
+            ENGINE_HR(impl_->device->CreateCommittedResource(
+                &hp, D3D12_HEAP_FLAG_NONE, &dd,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,
+                IID_PPV_ARGS(&impl_->depthBuffer)));
+
+            D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+            dsvDesc.Format        = DXGI_FORMAT_D32_FLOAT;
+            dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            impl_->device->CreateDepthStencilView(
+                impl_->depthBuffer.Get(), &dsvDesc,
+                impl_->dsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+            impl_->backBufferIndex = impl_->swapChain->GetCurrentBackBufferIndex();
+        }
+    }
+
     impl_->frameIndex = (impl_->frameIndex + 1) % kMaxFramesInFlight;
 
     PerFrameResources& frame = impl_->frames[impl_->frameIndex];
@@ -340,6 +404,10 @@ void* GpuDevice::nativeDevice() const noexcept {
 
 void* GpuDevice::nativeCommandList() const noexcept {
     return static_cast<void*>(impl_->frames[impl_->frameIndex].cmdList.Get());
+}
+
+void* GpuDevice::nativeCommandQueue() const noexcept {
+    return static_cast<void*>(impl_->directQueue.Get());
 }
 
 uint64_t GpuDevice::currentBackBufferRtvHandle() const noexcept {
