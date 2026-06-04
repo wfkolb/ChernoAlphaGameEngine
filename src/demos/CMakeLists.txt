@@ -17,3 +17,7 @@ add_custom_command(TARGET SpinDemo POST_BUILD
 # ---- ClearDemo ----
 add_executable(ClearDemo ClearDemo.cpp)
 target_link_libraries(ClearDemo PRIVATE ${DEMO_LINK_LIBS})
+
+# ---- InputDemo ----
+add_executable(InputDemo InputDemo.cpp)
+target_link_libraries(InputDemo PRIVATE ${DEMO_LINK_LIBS} d3dcompiler.lib)

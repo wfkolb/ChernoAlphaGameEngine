@@ -24,6 +24,9 @@ target_link_libraries(engine_tools
 find_package(tomlplusplus CONFIG REQUIRED)
 target_link_libraries(engine_tools PRIVATE tomlplusplus::tomlplusplus)
 
+find_package(lz4 CONFIG REQUIRED)
+target_link_libraries(engine_tools PRIVATE lz4::lz4)
+
 find_package(imgui CONFIG REQUIRED)
 target_link_libraries(engine_tools PRIVATE imgui::imgui)
 

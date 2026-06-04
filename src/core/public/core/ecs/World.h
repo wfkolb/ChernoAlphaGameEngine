@@ -81,7 +81,6 @@ namespace engine::core::ecs {
         std::vector<std::unique_ptr<Archetype>> archetypes_;
         Archetype*                           emptyArchetype_ = nullptr;
 
-        static inline ComponentTypeId                  nextId_   = 0;
         static inline std::array<ComponentMeta, 256>   registry_ = {};
 
         Archetype* getOrCreateArchetype(const ComponentMask& mask);

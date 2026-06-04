@@ -12,6 +12,7 @@
     },
     "gtest",
     "benchmark",
-    "tomlplusplus"
+    "tomlplusplus",
+    "lz4"
   ]
 }

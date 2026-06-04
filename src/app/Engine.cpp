@@ -7,6 +7,14 @@
 #include "core/Input.h"
 #include "core/log.h"
 #include <core/ecs/Name.h>
+#include <core/components/Transform.h>
+#include <core/components/Health.h>
+#include <core/components/Lifetime.h>
+#include <core/components/TeamTag.h>
+#include <core/input/InputReceiverComponent.h>
+#include <physics/RigidBody.h>
+#include <physics/CharacterController.h>
+#include <networking/NetworkIdentity.h>
 
 namespace engine::app {
 
@@ -31,14 +39,51 @@ bool Engine::init(const EngineConfig& cfg) {
     // 3. Winsock
     winsockGuard_ = std::make_unique<WinsockGuardHolder>();
 
-    // 4. ECS + EventBus — register built-in components before creating any world
-    core::ecs::World::registerComponent<core::ecs::Name>({
-        "Name",
-        sizeof(core::ecs::Name),
-        alignof(core::ecs::Name),
-        [](void* ptr) { new(ptr) core::ecs::Name{}; },
-        nullptr,
-        nullptr
+    // 4. ECS + EventBus — register components in ID order before creating any world
+    core::ecs::World::registerComponent<core::ecs::Name>({        // id 0
+        "Name", sizeof(core::ecs::Name), alignof(core::ecs::Name),
+        [](void* ptr) { new(ptr) core::ecs::Name{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::Transform>({        // id 1
+        "Transform", sizeof(core::Transform), alignof(core::Transform),
+        [](void* ptr) { new(ptr) core::Transform{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::input::InputReceiverComponent>({ // id 2
+        "InputReceiverComponent",
+        sizeof(core::input::InputReceiverComponent),
+        alignof(core::input::InputReceiverComponent),
+        [](void* ptr) { new(ptr) core::input::InputReceiverComponent{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::Health>({           // id 3
+        "Health", sizeof(core::Health), alignof(core::Health),
+        [](void* ptr) { new(ptr) core::Health{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::Lifetime>({         // id 4
+        "Lifetime", sizeof(core::Lifetime), alignof(core::Lifetime),
+        [](void* ptr) { new(ptr) core::Lifetime{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::TeamTag>({          // id 5
+        "TeamTag", sizeof(core::TeamTag), alignof(core::TeamTag),
+        [](void* ptr) { new(ptr) core::TeamTag{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<physics::RigidBody>({     // id 6
+        "RigidBody", sizeof(physics::RigidBody), alignof(physics::RigidBody),
+        [](void* ptr) { new(ptr) physics::RigidBody{}; }, nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<physics::CharacterController>({ // id 7
+        "CharacterController",
+        sizeof(physics::CharacterController),
+        alignof(physics::CharacterController),
+        [](void* ptr) { new(ptr) physics::CharacterController{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<networking::NetworkIdentity>({ // id 8
+        "NetworkIdentity",
+        sizeof(networking::NetworkIdentity),
+        alignof(networking::NetworkIdentity),
+        [](void* ptr) { new(ptr) networking::NetworkIdentity{}; },
+        nullptr, nullptr
     });
     world_    = std::make_unique<core::ecs::World>();
     eventBus_ = std::make_unique<core::EventBus>();

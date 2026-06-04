@@ -175,9 +175,10 @@ TEST(Mat4Test, perspectiveReverseZFarMapsToZero) {
 }
 
 TEST(Mat4Test, lookAtSetsForwardCorrectly) {
-    // Camera at origin looking toward +Z; the view matrix transforms
-    // world-space +Z into camera-space forward direction (+Z in view space).
+    // Camera at origin looking toward +Z world. In standard RH view space,
+    // camera +Z points backward (eye - target), so objects in front map to
+    // negative view-space z. World +Z transformed by this view = -1 on z-axis.
     Mat4 view = lookAtRh({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f});
     Vec3 camForward = transformDirection({0.0f, 0.0f, 1.0f}, view);
-    EXPECT_NEAR(camForward.z, 1.0f, 1e-4f);
+    EXPECT_NEAR(camForward.z, -1.0f, 1e-4f);
 }

@@ -36,4 +36,10 @@ public:
     static std::vector<SnapshotEntry> decode(std::span<const uint8_t> data);
 };
 
+// Acknowledgement sent by receiver to inform sender which snapshot was received.
+struct SnapshotAck {
+    uint32_t seq;
+    uint32_t receivedMs;
+};
+
 } // namespace engine::networking

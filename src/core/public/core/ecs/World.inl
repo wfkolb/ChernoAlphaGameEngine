@@ -10,8 +10,8 @@ namespace engine::core::ecs {
 
     template<typename T>
     ComponentTypeId World::registerComponent(ComponentMeta meta) {
-        ENGINE_ASSERT(nextId_ < 255, "ComponentTypeId overflow");
-        const ComponentTypeId id = nextId_++;
+        constexpr ComponentTypeId id = T::kComponentId;
+        static_assert(id < 256, "ComponentTypeId out of range");
         registry_[id] = meta;
         return id;
     }

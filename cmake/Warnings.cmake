@@ -5,6 +5,7 @@ set(ENGINE_COMPILE_FLAGS
     /Zc:__cplusplus  # Report the correct value of __cplusplus (MSVC lies by default)
     /Zc:preprocessor # Use the new conforming preprocessor required for __VA_OPT__
     /wd4201          # Nameless struct/union: DX12 headers use this extension pervasively
+    /wd4324          # Structure padded due to alignment: expected when Vec3/Quat (alignas(16)) mix with scalars
     /wd5105          # Windows SDK 10.0.19041.0 winbase.h macro produces 'defined' (SDK bug)
 )
 

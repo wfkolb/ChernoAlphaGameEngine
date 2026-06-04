@@ -17,4 +17,6 @@ target_compile_features(engine_core PUBLIC cxx_std_20)
 
 engine_add_warnings(engine_core)
 
-# core links only the Windows SDK; CMake finds it automatically via the MSVC toolchain.
+# tomlplusplus is header-only; link it so vcpkg exposes the include path.
+find_package(tomlplusplus CONFIG REQUIRED)
+target_link_libraries(engine_core PUBLIC tomlplusplus::tomlplusplus)
