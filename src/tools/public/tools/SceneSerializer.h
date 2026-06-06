@@ -1,6 +1,7 @@
 #pragma once
 
 #include <core/ecs/Entity.h>
+#include <core/ecs/EntityFactory.h>
 #include <core/ecs/World.h>
 
 #include <array>
@@ -30,6 +31,13 @@ public:
                                         ComponentLoader             loader);
     static void clearComponentLoaders();
 
+    // Optional: provide an EntityFactory so that entities with a saved
+    // archetype name are reconstructed via EntityFactory::spawn() on load,
+    // giving them archetype defaults before applying stored component deltas.
+    // Pass nullptr to disable (default behaviour: create a bare entity).
+    static void setEntityFactory(core::ecs::EntityFactory* factory);
+    static void clearEntityFactory();
+
     // Serialize `scene` to a binary .scene file.  Returns false on I/O error.
     static bool save(const core::scene::Scene& scene,
                      const std::filesystem::path& path);
@@ -50,6 +58,7 @@ public:
 
 private:
     static inline std::array<ComponentLoader, 256> loaders_ = {};
+    static inline core::ecs::EntityFactory*        factory_ = nullptr;
 };
 
 } // namespace engine::tools
