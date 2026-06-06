@@ -5,6 +5,7 @@
 #include "CharacterControllerImpl.h"
 #include <core/log.h>
 #include <core/math/Constants.h>
+#include <core/TaskScheduler.h>
 #include <unordered_map>
 #include <vector>
 #include <cmath>
@@ -45,6 +46,9 @@ struct PhysicsWorld::Impl {
     internal::StaticBVH  staticBVH;
     internal::DynamicGrid dynamicGrid;
     bool staticDirty = true;
+
+    // Shared thread pool for parallel broad/narrow-phase work.
+    engine::core::TaskScheduler scheduler;
 
     BodyData* find(BodyId id) noexcept {
         auto it = idToIndex.find(id);
@@ -249,64 +253,115 @@ void PhysicsWorld::step(float dt) {
         b.accumulatedForce = Vec3::zero();
     }
 
-    // 2. Collision detection & resolution for dynamic bodies vs static bodies
+    // 2. Collision detection: broad-phase query + narrow-phase per dynamic body.
+    //    Each dynamic body is independent (reads-only from static BVH/bodies),
+    //    so we partition the dynamic-body index list across worker tasks and
+    //    accumulate contacts per-task, then merge before the constraint solver.
+
     struct ContactInfo {
         size_t  dynIdx;
         Vec3    normal;
         float   depth;
     };
-    std::vector<ContactInfo> contacts;
 
-    for (size_t di = 0; di < impl_->bodies.size(); ++di) {
-        BodyData& dyn = impl_->bodies[di];
-        if (dyn.isCharacterController || dyn.rb.type != RigidBodyType::Dynamic) continue;
+    // Helper: run the narrow-phase dispatch for one dyn/stat pair.
+    auto narrowPhase = [&](const BodyData& dyn, const BodyData& stat)
+        -> internal::ContactManifold
+    {
+        return std::visit([&](const auto& shA) -> internal::ContactManifold {
+            return std::visit([&](const auto& shB) -> internal::ContactManifold {
+                using A = std::decay_t<decltype(shA)>;
+                using B = std::decay_t<decltype(shB)>;
 
-        const AABB dynAABB = internal::computeAABB(dyn.collider, dyn.position, dyn.rotation);
+                if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, SphereShape>)
+                    return internal::testSphereSphere(shA, dyn.position, shB, stat.position);
+                else if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, BoxShape>)
+                    return internal::testSphereBox(shA, dyn.position, shB, stat.position, stat.rotation);
+                else if constexpr (std::is_same_v<A, BoxShape> && std::is_same_v<B, BoxShape>)
+                    return internal::testBoxBox(shA, dyn.position, dyn.rotation, shB, stat.position, stat.rotation);
+                else if constexpr (std::is_same_v<A, BoxShape> && std::is_same_v<B, SphereShape>) {
+                    auto m = internal::testSphereBox(shB, stat.position, shA, dyn.position, dyn.rotation);
+                    for (int c = 0; c < m.count; ++c) m.contacts[c].normal = -m.contacts[c].normal;
+                    return m;
+                }
+                else if constexpr (std::is_same_v<A, CapsuleShape> && std::is_same_v<B, CapsuleShape>)
+                    return internal::testCapsuleCapsule(shA, dyn.position, dyn.rotation, shB, stat.position, stat.rotation);
+                else if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, CapsuleShape>)
+                    return internal::testSphereCapsule(shA, dyn.position, shB, stat.position, stat.rotation);
+                else {
+                    return internal::ContactManifold{};
+                }
+            }, stat.collider.shape);
+        }, dyn.collider.shape);
+    };
 
-        // Query static BVH
-        std::vector<uint32_t> candidates;
-        impl_->staticBVH.query(dynAABB, candidates);
+    // Collect the indices of all dynamic bodies once.
+    std::vector<size_t> dynIndices;
+    dynIndices.reserve(impl_->bodies.size());
+    for (size_t i = 0; i < impl_->bodies.size(); ++i) {
+        const BodyData& b = impl_->bodies[i];
+        if (!b.isCharacterController && b.rb.type == RigidBodyType::Dynamic)
+            dynIndices.push_back(i);
+    }
 
-        for (uint32_t si : candidates) {
-            BodyData& stat = impl_->bodies[si];
-            internal::ContactManifold manifold;
+    // Partition the dynamic-body index list into per-worker chunks.
+    // Each task writes to its own contacts sub-vector (no shared writes).
+    const unsigned int workerCount = impl_->scheduler.threadCount();
+    const size_t       dynCount    = dynIndices.size();
 
-            // Dispatch narrow phase based on shape types
-            auto narrow = [&]() {
-                return std::visit([&](const auto& shA) -> internal::ContactManifold {
-                    return std::visit([&](const auto& shB) -> internal::ContactManifold {
-                        using A = std::decay_t<decltype(shA)>;
-                        using B = std::decay_t<decltype(shB)>;
+    // Per-task contact storage; sized to workerCount before any submit().
+    std::vector<std::vector<ContactInfo>> perTaskContacts(workerCount);
 
-                        if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, SphereShape>)
-                            return internal::testSphereSphere(shA, dyn.position, shB, stat.position);
-                        else if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, BoxShape>)
-                            return internal::testSphereBox(shA, dyn.position, shB, stat.position, stat.rotation);
-                        else if constexpr (std::is_same_v<A, BoxShape> && std::is_same_v<B, BoxShape>)
-                            return internal::testBoxBox(shA, dyn.position, dyn.rotation, shB, stat.position, stat.rotation);
-                        else if constexpr (std::is_same_v<A, BoxShape> && std::is_same_v<B, SphereShape>) {
-                            auto m = internal::testSphereBox(shB, stat.position, shA, dyn.position, dyn.rotation);
-                            for (int c = 0; c < m.count; ++c) m.contacts[c].normal = -m.contacts[c].normal;
-                            return m;
+    for (unsigned int t = 0; t < workerCount; ++t) {
+        // Compute the inclusive slice [begin, end) for this task.
+        const size_t begin = (dynCount *  t     ) / workerCount;
+        const size_t end   = (dynCount * (t + 1)) / workerCount;
+        if (begin >= end) continue; // empty slice — no task needed
+
+        // Capture by value what each task needs (read-only pointers to impl_).
+        const std::vector<BodyData>*  bodies      = &impl_->bodies;
+        const internal::StaticBVH*    staticBVH   = &impl_->staticBVH;
+        std::vector<ContactInfo>*     taskContacts = &perTaskContacts[t];
+
+        // The future is intentionally discarded: we synchronise via wait() below.
+        (void)impl_->scheduler.submit(
+            [bodies, staticBVH, taskContacts, &dynIndices, &narrowPhase,
+             begin, end]()
+        {
+            for (size_t si = begin; si < end; ++si) {
+                const size_t        di  = dynIndices[si];
+                const BodyData&     dyn = (*bodies)[di];
+
+                const AABB dynAABB = internal::computeAABB(
+                    dyn.collider, dyn.position, dyn.rotation);
+
+                std::vector<uint32_t> candidates;
+                staticBVH->query(dynAABB, candidates);
+
+                for (uint32_t ci : candidates) {
+                    const BodyData& stat = (*bodies)[ci];
+                    const internal::ContactManifold manifold =
+                        narrowPhase(dyn, stat);
+                    for (int c = 0; c < manifold.count; ++c) {
+                        if (manifold.contacts[c].depth > 0.0f) {
+                            taskContacts->push_back({
+                                di,
+                                manifold.contacts[c].normal,
+                                manifold.contacts[c].depth
+                            });
                         }
-                        else if constexpr (std::is_same_v<A, CapsuleShape> && std::is_same_v<B, CapsuleShape>)
-                            return internal::testCapsuleCapsule(shA, dyn.position, dyn.rotation, shB, stat.position, stat.rotation);
-                        else if constexpr (std::is_same_v<A, SphereShape> && std::is_same_v<B, CapsuleShape>)
-                            return internal::testSphereCapsule(shA, dyn.position, shB, stat.position, stat.rotation);
-                        else {
-                            internal::ContactManifold empty;
-                            return empty;
-                        }
-                    }, stat.collider.shape);
-                }, dyn.collider.shape);
-            };
-
-            manifold = narrow();
-            for (int c = 0; c < manifold.count; ++c) {
-                if (manifold.contacts[c].depth > 0.0f)
-                    contacts.push_back({di, manifold.contacts[c].normal, manifold.contacts[c].depth});
+                    }
+                }
             }
-        }
+        });
+    }
+
+    // Wait for all tasks, then merge contacts.
+    impl_->scheduler.wait();
+
+    std::vector<ContactInfo> contacts;
+    for (auto& tc : perTaskContacts) {
+        contacts.insert(contacts.end(), tc.begin(), tc.end());
     }
 
     // 3. Sequential impulse solver (single iteration for Phase 7)
