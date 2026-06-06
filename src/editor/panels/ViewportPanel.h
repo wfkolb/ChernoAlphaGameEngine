@@ -13,6 +13,7 @@
 #include <filesystem>
 
 namespace engine::core::ecs { class World; }
+namespace engine::physics { class PhysicsWorld; }
 
 namespace engine::editor {
 
@@ -63,6 +64,11 @@ public:
     // Optional pointer to the editor dirty flag, set by EditorApp.
     void setSceneDirty(bool* flag) noexcept { sceneDirty_ = flag; }
 
+    // Optional PhysicsWorld for snap-to-surface (Shift+place). When set and
+    // the user holds Shift during a translate drag, the entity is snapped to
+    // the first physics surface hit under the cursor.
+    void setPhysicsWorld(engine::physics::PhysicsWorld* pw) noexcept { physicsWorld_ = pw; }
+
 private:
     void handleCameraInput(EditorCamera& camera, bool hovered);
     void drawGizmo(core::ecs::World& world,
@@ -95,6 +101,7 @@ private:
 
     bool pieActive_   = false;
     bool* sceneDirty_ = nullptr;
+    engine::physics::PhysicsWorld* physicsWorld_ = nullptr;
 
     // Gizmo drag state (one drag => one undo command).
     bool            dragging_            = false;

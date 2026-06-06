@@ -1,6 +1,7 @@
 #ifdef ENGINE_DEVREL
 
 #include "editor/panels/SceneHierarchyPanel.h"
+#include "editor/SelectionSystem.h"
 #include "editor/UndoStack.h"
 #include "editor/commands/EntityCommand.h"
 
@@ -10,10 +11,12 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace engine::editor {
 
@@ -62,11 +65,17 @@ void SceneHierarchyPanel::drawEntityNode(
         return;
     }
 
+    // Track visit order for Shift+click range-select.
+    visitOrder_.push_back(entity);
+
     ImGui::PushID(static_cast<int>(entity.index));
 
     const auto* hc         = world.tryGet<core::ecs::HierarchyComponent>(entity);
     const bool  hasChildren = hc && hc->firstChild != core::ecs::kInvalidEntity;
-    const bool  isSel       = (entity == newSelection);
+
+    // Highlight if it's the primary selection or part of multi-select.
+    const bool isSel = (entity == newSelection) ||
+                       (selectionSystem_ && selectionSystem_->isSelected(entity));
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
                              | ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -76,7 +85,25 @@ void SceneHierarchyPanel::drawEntityNode(
     const bool nodeOpen = ImGui::TreeNodeEx(label.c_str(), flags);
 
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-        newSelection = entity;
+        ImGuiIO& io = ImGui::GetIO();
+        if (selectionSystem_) {
+            if (io.KeyCtrl) {
+                // Ctrl+click: toggle in multi-select.
+                selectionSystem_->toggleSelect(entity);
+                // Keep newSelection pointing at the last toggled entity when adding.
+                if (selectionSystem_->isSelected(entity)) newSelection = entity;
+            } else if (io.KeyShift) {
+                // Shift+click: range-select using current visit order.
+                selectionSystem_->rangeSelect(entity, visitOrder_);
+                newSelection = entity;
+            } else {
+                // Plain click: single-select, clear multi.
+                selectionSystem_->selectOnly(entity);
+                newSelection = entity;
+            }
+        } else {
+            newSelection = entity;
+        }
     }
 
     if (ImGui::BeginPopupContextItem("##ctx")) {
@@ -118,6 +145,7 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
         CreateEntityCommand* raw = cmd.get();
         undo.push(std::move(cmd));
         selected = raw->entity();
+        if (selectionSystem_) selectionSystem_->selectOnly(selected);
     }
     ImGui::SameLine();
     const bool canDelete = world.isAlive(selected);
@@ -125,6 +153,7 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
     if (ImGui::Button("- Entity") && canDelete) {
         undo.push(std::make_unique<DestroyEntityCommand>(world, selected));
         selected = core::ecs::kInvalidEntity;
+        if (selectionSystem_) selectionSystem_->clearSelection();
     }
     if (!canDelete) ImGui::EndDisabled();
 
@@ -135,6 +164,17 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
                 entityFactory_->spawn("FpsCharacter", params, world);
             if (spawned != core::ecs::kInvalidEntity) {
                 selected = spawned;
+                if (selectionSystem_) selectionSystem_->selectOnly(selected);
+                if (sceneDirty_) *sceneDirty_ = true;
+            }
+        }
+        if (ImGui::MenuItem("SpawnPoint")) {
+            core::ecs::SpawnParams params{};
+            const core::ecs::Entity spawned =
+                entityFactory_->spawn("SpawnPointEntity", params, world);
+            if (spawned != core::ecs::kInvalidEntity) {
+                selected = spawned;
+                if (selectionSystem_) selectionSystem_->selectOnly(selected);
                 if (sceneDirty_) *sceneDirty_ = true;
             }
         }
@@ -144,6 +184,40 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##hsearch", "Search", searchBuffer_, sizeof(searchBuffer_));
     ImGui::Separator();
+
+    // Ctrl+D: duplicate all selected entities (or just the primary selection).
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        ImGui::IsKeyPressed(ImGuiKey_D, false) &&
+        ImGui::GetIO().KeyCtrl) {
+
+        // Collect entities to duplicate (multi-select if available, else single).
+        std::vector<core::ecs::Entity> toDup;
+        if (selectionSystem_ && !selectionSystem_->selection().empty()) {
+            toDup = selectionSystem_->selection();
+        } else if (world.isAlive(selected)) {
+            toDup.push_back(selected);
+        }
+
+        core::ecs::Entity lastDup = core::ecs::kInvalidEntity;
+        for (core::ecs::Entity src : toDup) {
+            if (!world.isAlive(src)) continue;
+            auto cmd = std::make_unique<DuplicateEntityCommand>(world, src);
+            DuplicateEntityCommand* raw = cmd.get();
+            undo.push(std::move(cmd));
+            if (raw->duplicate() != core::ecs::kInvalidEntity) {
+                lastDup = raw->duplicate();
+            }
+        }
+
+        if (lastDup != core::ecs::kInvalidEntity) {
+            selected = lastDup;
+            if (selectionSystem_) selectionSystem_->selectOnly(lastDup);
+            if (sceneDirty_) *sceneDirty_ = true;
+        }
+    }
+
+    // Reset visit order before each tree traversal (used by range-select).
+    visitOrder_.clear();
 
     core::ecs::Entity newSelection        = selected;
     core::ecs::Entity toDelete            = core::ecs::kInvalidEntity;
@@ -161,7 +235,10 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
 
     if (world.isAlive(toDelete)) {
         undo.push(std::make_unique<DestroyEntityCommand>(world, toDelete));
-        if (newSelection == toDelete) newSelection = core::ecs::kInvalidEntity;
+        if (newSelection == toDelete) {
+            newSelection = core::ecs::kInvalidEntity;
+        }
+        if (selectionSystem_) selectionSystem_->clearSelection();
     }
 
     if (world.isAlive(saveAsPrefabEntity) && onSaveAsPrefab_) {
