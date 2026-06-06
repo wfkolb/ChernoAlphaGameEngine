@@ -4,6 +4,9 @@ file(GLOB_RECURSE EDITOR_TEST_SOURCES CONFIGURE_DEPENDS "*.cpp")
 set(EDITOR_IMPL_SOURCES
     "${CMAKE_SOURCE_DIR}/src/editor/EditorPrefs.cpp"
     "${CMAKE_SOURCE_DIR}/src/editor/MetaFileWriter.cpp"
+    "${CMAKE_SOURCE_DIR}/src/editor/SelectionSystem.cpp"
+    "${CMAKE_SOURCE_DIR}/src/editor/commands/EntityCommand.cpp"
+    "${CMAKE_SOURCE_DIR}/src/editor/UndoStack.cpp"
 )
 
 add_executable(editor_tests

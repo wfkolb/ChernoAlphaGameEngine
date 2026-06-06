@@ -11,6 +11,7 @@
 #include <core/components/ColliderComponent.h>
 #include <core/components/Transform.h>
 #include <core/math/Quat.h>
+#include <physics/PhysicsWorld.h>
 #include <tools/PrefabSerializer.h>
 
 #include <imgui.h>
@@ -169,14 +170,54 @@ void ViewportPanel::drawGizmo(core::ecs::World& world, core::ecs::Entity selecte
 
         switch (gizmoOp_) {
             case GizmoOp::Translate: {
-                // Map screen drag to world XZ plane plus vertical on Y.
-                const float worldPerPixel = 0.01f;
-                tr->position.x += dx * worldPerPixel;
-                tr->position.y -= dy * worldPerPixel;
-                if (snap) {
-                    tr->position.x = snapTo(tr->position.x, snapTranslate_);
-                    tr->position.y = snapTo(tr->position.y, snapTranslate_);
-                    tr->position.z = snapTo(tr->position.z, snapTranslate_);
+                // Snap-to-surface: when Shift is held and a PhysicsWorld is
+                // available, raycast from the cursor into the scene and place
+                // the entity at the hit point, aligning Y to the surface normal.
+                if (io.KeyShift && physicsWorld_) {
+                    bool invOk = false;
+                    const Mat4 invVP = core::math::inverse(viewProj, &invOk);
+                    if (invOk) {
+                        Vec3 rayOrigin, rayDir;
+                        SelectionSystem::rayFromPixel(
+                            io.MousePos.x - originX_,
+                            io.MousePos.y - originY_,
+                            contentWidth_, contentHeight_,
+                            invVP, rayOrigin, rayDir);
+
+                        engine::physics::QueryFilter filter{};
+                        const engine::physics::RaycastHit hit =
+                            physicsWorld_->raycast(rayOrigin, rayDir, 1000.0f, filter);
+
+                        if (hit.hasHit) {
+                            tr->position = hit.point;
+
+                            // Align entity up direction to the surface normal using
+                            // the shortest rotation from world-up {0,1,0}.
+                            const Vec3 worldUp = Vec3{0.f, 1.f, 0.f};
+                            const Vec3 n       = core::math::normalize(hit.normal);
+                            const float cosA   = core::math::dot(worldUp, n);
+
+                            // Guard near-180° flip (surface pointing straight down).
+                            if (cosA > -0.9999f) {
+                                const Vec3 axis = (cosA > 0.9999f)
+                                    ? Vec3{1.f, 0.f, 0.f}   // identity case
+                                    : core::math::normalize(core::math::cross(worldUp, n));
+                                const float angle = std::acos(
+                                    cosA < -1.0f ? -1.0f : (cosA > 1.0f ? 1.0f : cosA));
+                                tr->rotation = core::math::fromAxisAngle(axis, angle);
+                            }
+                        }
+                    }
+                } else {
+                    // Map screen drag to world XZ plane plus vertical on Y.
+                    const float worldPerPixel = 0.01f;
+                    tr->position.x += dx * worldPerPixel;
+                    tr->position.y -= dy * worldPerPixel;
+                    if (snap) {
+                        tr->position.x = snapTo(tr->position.x, snapTranslate_);
+                        tr->position.y = snapTo(tr->position.y, snapTranslate_);
+                        tr->position.z = snapTo(tr->position.z, snapTranslate_);
+                    }
                 }
                 break;
             }

@@ -55,6 +55,26 @@ private:
     bool              hadTransform_ = false;
 };
 
+// Deep-copies all components from a source entity, offsets the duplicate's
+// Transform by (0.5, 0, 0.5), and pushes the new entity onto the world.
+// Undo destroys the duplicate.
+class DuplicateEntityCommand : public ICommand {
+public:
+    DuplicateEntityCommand(core::ecs::World& world, core::ecs::Entity source);
+
+    void execute() override;
+    void undo() override;
+    const char* name() const override { return "Duplicate Entity"; }
+
+    // Valid after the first execute(); used by the editor to auto-select.
+    core::ecs::Entity duplicate() const noexcept { return duplicate_; }
+
+private:
+    core::ecs::World* world_;
+    core::ecs::Entity source_;
+    core::ecs::Entity duplicate_ = core::ecs::kInvalidEntity;
+};
+
 } // namespace engine::editor
 
 #endif // ENGINE_DEVREL

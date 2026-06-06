@@ -6,15 +6,21 @@
 
 #include <filesystem>
 #include <functional>
+#include <vector>
 
 namespace engine::core::ecs { class World; }
 
 namespace engine::editor {
 
+class SelectionSystem;
 class UndoStack;
 
 // Entity tree with selection, search filter, and a create/delete context menu.
 // Mutations go through the UndoStack so they are undoable.
+//
+// Multi-select: Ctrl+click toggles, Shift+click range-selects. The primary
+// "selected" entity (used by the Inspector) is the last entity clicked without
+// modifier. Ctrl+D duplicates all currently selected entities.
 class SceneHierarchyPanel {
 public:
     // Called when the user chooses "Save as Prefab..." from the context menu.
@@ -29,7 +35,13 @@ public:
         sceneDirty_    = dirtyFlag;
     }
 
-    // Returns the (possibly changed) selection. Pass the current selection in.
+    // Wire the SelectionSystem for multi-select support. Optional — if not set
+    // the panel falls back to single-select only.
+    void setSelectionSystem(SelectionSystem* sel) noexcept { selectionSystem_ = sel; }
+
+    // Returns the (possibly changed) primary selection. Pass the current
+    // selection in. When SelectionSystem is wired, multi-select state is
+    // updated there too.
     core::ecs::Entity draw(core::ecs::World& world,
                            core::ecs::Entity selected,
                            UndoStack& undo,
@@ -45,8 +57,12 @@ private:
 
     char                         searchBuffer_[128] = {};
     SaveAsPrefabFn               onSaveAsPrefab_;
-    core::ecs::EntityFactory*    entityFactory_ = nullptr;
-    bool*                        sceneDirty_    = nullptr;
+    core::ecs::EntityFactory*    entityFactory_   = nullptr;
+    bool*                        sceneDirty_      = nullptr;
+    SelectionSystem*             selectionSystem_ = nullptr;
+
+    // Flat visit order rebuilt each draw() — used for Shift+click range-select.
+    std::vector<core::ecs::Entity> visitOrder_;
 };
 
 } // namespace engine::editor

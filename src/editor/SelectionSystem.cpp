@@ -2,6 +2,10 @@
 
 #include "editor/SelectionSystem.h"
 
+#include <core/ecs/World.h>
+#include <core/components/Transform.h>
+
+#include <algorithm>
 #include <limits>
 
 namespace engine::editor {
@@ -61,6 +65,72 @@ core::ecs::Entity SelectionSystem::pickAtPixel(float px, float py,
         }
     }
     return best;
+}
+
+// ---- Multi-select -----------------------------------------------------------
+
+void SelectionSystem::selectOnly(core::ecs::Entity e) {
+    selection_.clear();
+    if (e != core::ecs::kInvalidEntity) {
+        selection_.push_back(e);
+    }
+    pivot_ = e;
+}
+
+void SelectionSystem::toggleSelect(core::ecs::Entity e) {
+    if (e == core::ecs::kInvalidEntity) return;
+    auto it = std::find(selection_.begin(), selection_.end(), e);
+    if (it != selection_.end()) {
+        selection_.erase(it);
+        if (pivot_ == e) {
+            pivot_ = selection_.empty() ? core::ecs::kInvalidEntity : selection_.back();
+        }
+    } else {
+        selection_.push_back(e);
+        pivot_ = e;
+    }
+}
+
+void SelectionSystem::rangeSelect(core::ecs::Entity e,
+                                  const std::vector<core::ecs::Entity>& orderedEntities) {
+    if (e == core::ecs::kInvalidEntity) return;
+
+    // Locate pivot and target in the ordered list.
+    const core::ecs::Entity effectivePivot =
+        (pivot_ != core::ecs::kInvalidEntity) ? pivot_ : e;
+
+    auto pivotIt  = std::find(orderedEntities.begin(), orderedEntities.end(), effectivePivot);
+    auto targetIt = std::find(orderedEntities.begin(), orderedEntities.end(), e);
+
+    if (pivotIt == orderedEntities.end() || targetIt == orderedEntities.end()) {
+        selectOnly(e);
+        return;
+    }
+
+    if (pivotIt > targetIt) std::swap(pivotIt, targetIt);
+
+    for (auto it = pivotIt; it <= targetIt; ++it) {
+        if (std::find(selection_.begin(), selection_.end(), *it) == selection_.end()) {
+            selection_.push_back(*it);
+        }
+    }
+    // Do not move pivot on a range extension.
+}
+
+bool SelectionSystem::isSelected(core::ecs::Entity e) const noexcept {
+    return std::find(selection_.begin(), selection_.end(), e) != selection_.end();
+}
+
+core::math::Vec3 SelectionSystem::selectionCentroid(core::ecs::World& world) const {
+    Vec3 sum = Vec3::zero();
+    int  count = 0;
+    for (core::ecs::Entity e : selection_) {
+        if (const auto* tr = world.tryGet<core::Transform>(e)) {
+            sum += tr->position;
+            ++count;
+        }
+    }
+    return (count > 0) ? sum * (1.0f / static_cast<float>(count)) : Vec3::zero();
 }
 
 } // namespace engine::editor
