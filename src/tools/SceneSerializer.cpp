@@ -150,7 +150,6 @@ static void writeGlobals(ByteWriter& bw, const core::scene::SceneGlobals& g) {
     bw.writeU32(static_cast<uint32_t>(g.maxPlayers));
     bw.writeString(g.sceneName);
     bw.writeString(g.gameMode);
-    bw.writeString(g.navmeshAsset);
     bw.writeU32(static_cast<uint32_t>(g.spawnPoints.size()));
     for (const auto& sp : g.spawnPoints) {
         bw.writeF32(sp.x);
@@ -175,11 +174,6 @@ static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
     g.maxPlayers     = static_cast<int>(br.readU32());
     g.sceneName      = br.readString();
     g.gameMode       = br.readString();
-    g.navmeshAsset   = br.readString();
-    if (!g.navmeshAsset.empty()) {
-        LOG_WARN("SceneSerializer: navmeshAsset '{}' loaded but navigation is not "
-                 "implemented; field ignored until Phase 9", g.navmeshAsset);
-    }
     const uint32_t spCount = br.readU32();
     g.spawnPoints.resize(spCount);
     for (uint32_t i = 0; i < spCount; ++i) {
@@ -347,10 +341,8 @@ bool SceneSerializer::save(const core::scene::Scene& scene,
 
     // ── 4. Build Asset Ref Table binary ───────────────────────────────────────
 
-    // Collect asset paths referenced in SceneGlobals.
+    // Collect asset paths referenced in SceneGlobals (none currently).
     std::vector<std::string> assetPaths;
-    if (!globals.navmeshAsset.empty())
-        assetPaths.push_back(globals.navmeshAsset);
 
     ByteWriter assetRefTable;
     assetRefTable.writeU32(static_cast<uint32_t>(assetPaths.size()));
