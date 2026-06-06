@@ -7,8 +7,12 @@
 #include "MeshRenderSystem.h"
 #include <physics/PhysicsWorld.h>
 #include <rendering/MeshManager.h>
+#include <rendering/Camera.h>
 #include <tools/EassetLoader.h>
 #include <core/log.h>
+#include <core/ecs/View.h>
+#include <core/components/Transform.h>
+#include <core/math/Mat.h>
 #include <algorithm>
 #include <chrono>
 #include <span>
@@ -82,7 +86,7 @@ void Application::run() {
     float           accumulator   = 0.0f;
     auto            prevTime      = Clock::now();
 
-    engine_->run([&](core::ecs::World& /*world*/, rendering::FrameGraph& /*fg*/) {
+    engine_->run([&](core::ecs::World& world, rendering::FrameGraph& fg) {
         // BW3: MeshManager must be constructed while a frame is open (after beginFrame).
         // Engine::run() calls beginFrame() before this callback.
         if (!meshManager_) {
@@ -127,6 +131,60 @@ void Application::run() {
 #ifdef ENGINE_DEVREL
         if (game_) game_->onDebugUI(context_);
 #endif
+
+        // #66 — Camera System Integration:
+        // Find the first entity with both Transform and Camera components (isMain==true).
+        // Compute view * proj and dispatch MeshRenderSystem for this frame.
+        if (meshManager_) {
+            const core::Transform*    camTransform = nullptr;
+            const rendering::Camera*  camCamera    = nullptr;
+
+            core::ecs::View<core::Transform, rendering::Camera> camView(world);
+            for (auto [entity, transform, camera] : camView) {
+                if (camera.isMain && camTransform == nullptr) {
+                    camTransform = &transform;
+                    camCamera    = &camera;
+                }
+            }
+
+            rendering::GpuDevice& dev = engine_->device();
+            if (camTransform && camCamera && dev.isValid()) {
+                const uint32_t w = dev.clientWidth();
+                const uint32_t h = dev.clientHeight();
+                const float aspect = (h > 0) ? static_cast<float>(w) / static_cast<float>(h)
+                                              : 1.0f;
+
+                // Build view and proj matrices from the camera entity.
+                core::math::Transform mathTransform{};
+                mathTransform.position = camTransform->position;
+                mathTransform.rotation = camTransform->rotation;
+                mathTransform.scale    = camTransform->scale;
+
+                const core::math::Mat4 viewMat = rendering::cameraViewMatrix(mathTransform);
+                const core::math::Mat4 projMat = rendering::cameraProjMatrix(*camCamera, aspect);
+                const core::math::Mat4 viewProj = viewMat * projMat;
+
+                // Import GPU resources into the frame graph.
+                // beginFrame() already transitioned the back buffer to RENDER_TARGET (0x4).
+                const rendering::ResourceHandle bb = fg.importBackBuffer(
+                    dev.nativeBackBuffer(),
+                    dev.currentBackBufferRtvHandle(),
+                    static_cast<uint32_t>(4u)); // D3D12_RESOURCE_STATE_RENDER_TARGET
+                const rendering::ResourceHandle db = fg.importDepthBuffer(
+                    dev.nativeDepthBuffer(),
+                    dev.depthBufferDsvHandle());
+
+                meshRenderSystem_->tick(world, *meshManager_, fg,
+                                        &viewProj.m[0][0],
+                                        bb, db, w, h);
+            } else {
+                // Warn once per scene if there are mesh entities but no active camera.
+                if (!noCameraWarned_ && !meshRenderSystem_->empty()) {
+                    LOG_WARN("Application: no active Camera entity found — mesh rendering skipped");
+                    noCameraWarned_ = true;
+                }
+            }
+        }
     });
 }
 
@@ -143,6 +201,7 @@ void Application::wireScene(core::scene::Scene& scene) {
     scene.setMeshUnloadFn([this]() {
         if (meshRenderSystem_) meshRenderSystem_->clear();
         pendingMeshLoads_.clear();
+        noCameraWarned_ = false;  // Reset so the warning fires again for the next scene.
     });
 }
 

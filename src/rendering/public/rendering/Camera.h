@@ -1,5 +1,6 @@
 #pragma once
 
+#include <core/ecs/Entity.h>
 #include <core/math/Mat.h>
 #include <core/math/Transform.h>
 
@@ -9,7 +10,10 @@ namespace engine::rendering {
     // The renderer renders from the first entity where isMain == true.
     // Projection: perspective, reverse-Z, right-handed, Y-up.
     // nearZ maps to depth 1.0; farZ maps to depth 0.0.
+    // kComponentId = 16: follows the last planned Phase 9 component (15 = TriggerComponent).
     struct Camera {
+        static constexpr engine::core::ecs::ComponentTypeId kComponentId = 16;
+
         float fovYDegrees { 60.0f };
         float nearZ       {  0.1f };
         float farZ        { 1000.0f };

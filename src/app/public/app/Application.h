@@ -45,9 +45,10 @@ private:
     SystemScheduler                            scheduler_;
     GameLoop                                   gameLoop_;
     GameContext                                context_;
-    IGame*                                     game_        = nullptr;
-    bool                                       initialized_ = false;
-    uint16_t                                   hostPort_    = 0;
+    IGame*                                     game_             = nullptr;
+    bool                                       initialized_      = false;
+    bool                                       noCameraWarned_   = false;
+    uint16_t                                   hostPort_         = 0;
     std::string                                connectAddr_;
 
     void wireScene(core::scene::Scene& scene);

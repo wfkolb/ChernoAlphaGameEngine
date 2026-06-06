@@ -49,6 +49,9 @@ public:
     // Releases all registered GPU handles. Called from meshUnloadFn.
     void clear();
 
+    // Returns true when no GPU mesh handles are registered (no renderable meshes in scene).
+    bool empty() const noexcept { return handles_.empty(); }
+
 private:
     std::unordered_map<uint32_t, rendering::MeshHandle> handles_;
     std::unique_ptr<rendering::FlatShadePipeline>        pipeline_;
