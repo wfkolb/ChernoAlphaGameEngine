@@ -47,7 +47,12 @@ EditorImporter::Result doImport(std::filesystem::path source,
     std::error_code ec;
     std::filesystem::create_directories(outputDir, ec);
 
-    const auto importResult = tools::importGltf(source, eassetPath);
+    // Map editor AssetImportSettings → tools::ImportSettings.
+    tools::ImportSettings importSettings;
+    importSettings.generateCollision = settings.generateCollision;
+    importSettings.collisionType     = settings.collisionType;
+
+    const auto importResult = tools::importGltf(source, eassetPath, importSettings);
     if (!importResult.ok) {
         result.succeeded    = false;
         result.errorMessage = importResult.errorMessage;

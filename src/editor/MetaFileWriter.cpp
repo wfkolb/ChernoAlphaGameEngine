@@ -46,6 +46,7 @@ void write(const std::filesystem::path& eassetPath, const AssetMeta& meta) {
     settings.insert_or_assign("uniform_scale",      static_cast<double>(meta.settings.uniformScale));
     settings.insert_or_assign("up_axis_z",           meta.settings.upAxisZ);
     settings.insert_or_assign("generate_collision",  meta.settings.generateCollision);
+    settings.insert_or_assign("collision_type",      static_cast<int64_t>(meta.settings.collisionType));
     settings.insert_or_assign("merge_meshes",        meta.settings.mergeMeshes);
 
     toml::table root;
@@ -82,6 +83,8 @@ AssetMeta read(const std::filesystem::path& eassetPath) {
             meta.settings.upAxisZ = *v;
         if (auto v = tbl["import_settings"]["generate_collision"].value<bool>())
             meta.settings.generateCollision = *v;
+        if (auto v = tbl["import_settings"]["collision_type"].value<int64_t>())
+            meta.settings.collisionType = static_cast<tools::CollisionType>(*v);
         if (auto v = tbl["import_settings"]["merge_meshes"].value<bool>())
             meta.settings.mergeMeshes = *v;
 

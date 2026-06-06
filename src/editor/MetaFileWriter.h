@@ -1,6 +1,7 @@
 #pragma once
 #ifdef ENGINE_DEVREL
 
+#include <tools/AssetImporter.h>
 #include <filesystem>
 #include <string>
 #include <cstdint>
@@ -9,11 +10,12 @@ namespace engine::editor {
 
 // Import settings persisted alongside a cooked .easset file.
 struct AssetImportSettings {
-    float   uniformScale      = 1.0f;
-    bool    upAxisZ           = false; // false = Y-up (default), true = Z-up (Blender)
-    bool    generateCollision = false;
-    bool    mergeMeshes       = true;
-    int     lodCount          = 1;     // Clamped to 1 for Phase 8; reserved for future LOD support
+    float                       uniformScale      = 1.0f;
+    bool                        upAxisZ           = false; // false = Y-up (default), true = Z-up (Blender)
+    bool                        generateCollision = false;
+    tools::CollisionType        collisionType     = tools::CollisionType::TriangleMesh;
+    bool                        mergeMeshes       = true;
+    int                         lodCount          = 1;     // Clamped to 1 for Phase 8; reserved for future LOD support
 };
 
 // Per-asset sidecar (.easset.meta). Cached source fingerprint lets

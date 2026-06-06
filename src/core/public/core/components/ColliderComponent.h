@@ -6,13 +6,20 @@
 namespace engine::core {
 
 // Trivially-copyable ECS component describing a collision shape.
-// Supports Box, Sphere, and Capsule for editor authoring.
-// ConvexHull and TriangleMesh are driven by mesh asset data and are not
-// stored in this component.
+// Box, Sphere, Capsule carry inline parameters for editor authoring.
+// ConvexHull and TriangleMesh are mesh-derived shapes: the actual geometry
+// lives in the .easset file referenced by MeshHandle on the same entity.
+// The physics module reads the MeshHandle asset path to obtain vertex data.
 struct ColliderComponent {
     static constexpr ecs::ComponentTypeId kComponentId = 9;
 
-    enum class Shape : uint8_t { Box = 0, Sphere, Capsule };
+    enum class Shape : uint8_t {
+        Box         = 0,
+        Sphere      = 1,
+        Capsule     = 2,
+        ConvexHull  = 3, // mesh-derived; geometry loaded from MeshHandle asset
+        TriangleMesh = 4, // mesh-derived; geometry loaded from MeshHandle asset
+    };
 
     struct BoxParams     { float halfX = 0.5f; float halfY = 0.5f; float halfZ = 0.5f; };
     struct SphereParams  { float radius = 0.5f; float _p0 = 0.f; float _p1 = 0.f; };

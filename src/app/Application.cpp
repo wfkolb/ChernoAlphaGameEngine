@@ -9,6 +9,7 @@
 #include <rendering/MeshManager.h>
 #include <rendering/Camera.h>
 #include <tools/EassetLoader.h>
+#include <core/components/ColliderComponent.h>
 #include <core/log.h>
 #include <core/ecs/View.h>
 #include <core/components/Transform.h>
@@ -95,6 +96,8 @@ void Application::run() {
 
         // BW2: upload any meshes queued by the mesh-load delegate during scene activation.
         if (!pendingMeshLoads_.empty()) {
+            // Resolve scene world once for the whole batch.
+            core::scene::Scene* activeScene = sceneManager_.getActive();
             for (const auto& load : pendingMeshLoads_) {
                 auto cpuMesh = tools::loadEasset(load.assetPath);
                 if (cpuMesh) {
@@ -102,6 +105,23 @@ void Application::run() {
                         std::span<const rendering::VertexStatic>(cpuMesh->vertices),
                         std::span<const uint32_t>(cpuMesh->indices));
                     meshRenderSystem_->registerHandle(load.entityIndex, gpuHandle);
+
+                    // Auto-attach ColliderComponent if the .easset has a collision
+                    // section and the entity does not already have one.
+                    if (cpuMesh->collision && activeScene) {
+                        core::ecs::Entity e{ load.entityIndex, load.entityGeneration };
+                        auto& world = activeScene->world();
+                        if (!world.tryGet<core::ColliderComponent>(e)) {
+                            core::ColliderComponent cc{};
+                            if (cpuMesh->collision->type ==
+                                tools::CollisionType::ConvexHull) {
+                                cc.shape = core::ColliderComponent::Shape::ConvexHull;
+                            } else {
+                                cc.shape = core::ColliderComponent::Shape::TriangleMesh;
+                            }
+                            world.addComponent<core::ColliderComponent>(e, cc);
+                        }
+                    }
                 } else {
                     LOG_WARN("Application: failed to load mesh asset '{}'", load.assetPath);
                 }
@@ -196,7 +216,7 @@ void Application::wireScene(core::scene::Scene& scene) {
 
     // BW2: queue mesh load requests; actual GPU upload runs inside the render frame.
     scene.setMeshLoadFn([this](core::ecs::Entity e, const std::string& path) {
-        pendingMeshLoads_.push_back({e.index, path});
+        pendingMeshLoads_.push_back({e.index, e.generation, path});
     });
     scene.setMeshUnloadFn([this]() {
         if (meshRenderSystem_) meshRenderSystem_->clear();

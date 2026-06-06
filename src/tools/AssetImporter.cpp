@@ -7,6 +7,7 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <array>
 
 // cgltf — single-header glTF 2.0 parser (public domain, vcpkg package)
 // The implementation define must appear in exactly one translation unit.
@@ -24,9 +25,11 @@ namespace {
 
 #pragma pack(push, 1)
 
+// Version 1: 1 TocEntry (MESH only)
+// Version 2: 1 or 2 TocEntries (MESH, optional COLL)
 struct EassHeader {
     char     magic[4];        // "EASS"
-    uint16_t version;         // 1
+    uint16_t version;         // 1 or 2
     uint16_t assetType;       // 0 = Mesh
     uint32_t totalSize;       // filled after all data is written
     uint32_t tocOffset;       // offset to first TocEntry from start of file
@@ -35,7 +38,7 @@ struct EassHeader {
 static_assert(sizeof(EassHeader) == 20);
 
 struct TocEntry {
-    char     id[4];           // FourCC e.g. "MESH"
+    char     id[4];           // FourCC e.g. "MESH", "COLL"
     uint32_t offset;          // from start of file
     uint32_t size;            // bytes
     uint32_t reserved;        // 0
@@ -51,6 +54,18 @@ struct MeshSectionHeader {
     float    aabbMax[3];
 };
 static_assert(sizeof(MeshSectionHeader) == 36);
+
+// Collision section header (COLL section, version 2 only).
+// Immediately follows this header:
+//   float[3] × vertexCount   (position only)
+//   uint32_t × indexCount    (0 for ConvexHull)
+struct CollSectionHeader {
+    uint8_t  collisionType;   // 0 = TriangleMesh, 1 = ConvexHull
+    uint8_t  pad[3];
+    uint32_t vertexCount;
+    uint32_t indexCount;
+};
+static_assert(sizeof(CollSectionHeader) == 12);
 
 struct VertexStatic {
     float    position[3];     // 12 bytes
@@ -380,11 +395,86 @@ AABB computeAabb(const std::vector<VertexStatic>& verts) {
 }
 
 // ---------------------------------------------------------------------------
-// .easset writer — takes an already-optimized mesh and serialises it
+// Collision geometry generation
+// ---------------------------------------------------------------------------
+
+// Flat collision data ready to be serialised into the COLL section.
+struct CollisionData {
+    engine::tools::CollisionType        type;
+    std::vector<std::array<float, 3>>   vertices; // position only
+    std::vector<uint32_t>               indices;  // empty for ConvexHull
+};
+
+// Build a TriangleMesh collision from the optimised render mesh.
+// Positions are extracted directly; UV/normal data is stripped.
+CollisionData buildTriangleMeshCollision(const OptimizedMesh& mesh) {
+    CollisionData cd;
+    cd.type = engine::tools::CollisionType::TriangleMesh;
+    cd.vertices.reserve(mesh.vertices.size());
+    for (const VertexStatic& v : mesh.vertices) {
+        cd.vertices.push_back({ v.position[0], v.position[1], v.position[2] });
+    }
+    cd.indices = mesh.indices;
+    return cd;
+}
+
+// Build a ConvexHull collision from the optimised mesh.
+// Strategy: collect position-only data with duplicate elimination using
+// meshopt_generateVertexRemap on the position stream alone.
+// The deduplicated position set is a valid convex-hull point cloud; the
+// physics engine computes the actual convex hull from it at simulation time.
+// No index array is stored — physics uses a vertex soup for convex hulls.
+CollisionData buildConvexHullCollision(const OptimizedMesh& mesh) {
+    CollisionData cd;
+    cd.type = engine::tools::CollisionType::ConvexHull;
+
+    const size_t srcCount = mesh.vertices.size();
+    if (srcCount == 0) return cd;
+
+    // Build a packed float3 position buffer.
+    std::vector<float> positions;
+    positions.reserve(srcCount * 3);
+    for (const VertexStatic& v : mesh.vertices) {
+        positions.push_back(v.position[0]);
+        positions.push_back(v.position[1]);
+        positions.push_back(v.position[2]);
+    }
+
+    // Deduplicate positions using meshopt's vertex remap on position-only data.
+    // This removes any vertices that share the same position (can happen when
+    // multiple vertices differ only in normal/UV).
+    std::vector<unsigned int> remap(srcCount);
+    const size_t uniqueCount = meshopt_generateVertexRemap(
+        remap.data(),
+        nullptr,           // no index buffer — treat as unindexed
+        srcCount,
+        positions.data(),
+        srcCount,
+        sizeof(float) * 3);
+
+    // Collect the unique positions in their remapped order.
+    std::vector<std::array<float, 3>> uniquePos(uniqueCount);
+    for (size_t i = 0; i < srcCount; ++i) {
+        const unsigned int newIdx = remap[i];
+        uniquePos[newIdx] = {
+            positions[i * 3 + 0],
+            positions[i * 3 + 1],
+            positions[i * 3 + 2]
+        };
+    }
+
+    cd.vertices = std::move(uniquePos);
+    // ConvexHull stores no index array (physics uses vertex soup).
+    return cd;
+}
+
+// ---------------------------------------------------------------------------
+// .easset writer — version 1 (no collision) or version 2 (optional collision)
 // ---------------------------------------------------------------------------
 
 bool writeEasset(const std::filesystem::path& output,
-                 const OptimizedMesh& mesh)
+                 const OptimizedMesh& mesh,
+                 const CollisionData* collision)
 {
     const uint32_t vertexCount = static_cast<uint32_t>(mesh.vertices.size());
     const uint32_t indexCount  = static_cast<uint32_t>(mesh.indices.size());
@@ -394,18 +484,37 @@ bool writeEasset(const std::filesystem::path& output,
     const uint32_t indexDataSize   = indexCount  * static_cast<uint32_t>(sizeof(uint32_t));
     const uint32_t meshSectionSize = meshHeaderSize + vertexDataSize + indexDataSize;
 
+    const bool hasCollision    = (collision != nullptr);
+    const uint16_t fileVersion = hasCollision ? 2u : 1u;
+    const uint32_t tocEntries  = hasCollision ? 2u : 1u;
+
+    // Compute collision section size when needed.
+    uint32_t collSectionSize = 0;
+    if (hasCollision) {
+        collSectionSize = sizeof(CollSectionHeader)
+            + static_cast<uint32_t>(collision->vertices.size()) * 3u * sizeof(float)
+            + static_cast<uint32_t>(collision->indices.size())  * sizeof(uint32_t);
+    }
+
     // Layout:
-    //   [0..19]  EassHeader (20 bytes)
-    //   [20..35] TocEntry × 1  (16 bytes)
+    //   [0..19]       EassHeader (20 bytes)
+    //   [20..19+16*N] TocEntry × N  (N = 1 or 2, each 16 bytes)
     //   pad to 64
     //   MESH section
+    //   [optional] COLL section (64-byte aligned)
     constexpr uint32_t kHeaderSize   = sizeof(EassHeader);   // 20
     constexpr uint32_t kTocEntrySize = sizeof(TocEntry);     // 16
     const uint32_t tocOffset         = kHeaderSize;
-    const uint32_t rawDataStart      = kHeaderSize + kTocEntrySize;
+    const uint32_t rawDataStart      = kHeaderSize + tocEntries * kTocEntrySize;
     const uint32_t meshSectionOffset =
         (rawDataStart + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
-    const uint32_t totalSize         = meshSectionOffset + meshSectionSize;
+
+    uint32_t collSectionOffset = 0;
+    uint32_t totalSize         = meshSectionOffset + meshSectionSize;
+    if (hasCollision) {
+        collSectionOffset = (totalSize + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
+        totalSize         = collSectionOffset + collSectionSize;
+    }
 
     std::filesystem::create_directories(output.parent_path());
 
@@ -415,22 +524,32 @@ bool writeEasset(const std::filesystem::path& output,
     // Header
     EassHeader hdr{};
     std::memcpy(hdr.magic, "EASS", 4);
-    hdr.version       = 1;
+    hdr.version       = fileVersion;
     hdr.assetType     = 0;
     hdr.totalSize     = totalSize;
     hdr.tocOffset     = tocOffset;
-    hdr.tocEntryCount = 1;
+    hdr.tocEntryCount = tocEntries;
     fs.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
 
-    // TOC
-    TocEntry toc{};
-    std::memcpy(toc.id, "MESH", 4);
-    toc.offset   = meshSectionOffset;
-    toc.size     = meshSectionSize;
-    toc.reserved = 0;
-    fs.write(reinterpret_cast<const char*>(&toc), sizeof(toc));
+    // MESH TocEntry
+    TocEntry meshToc{};
+    std::memcpy(meshToc.id, "MESH", 4);
+    meshToc.offset   = meshSectionOffset;
+    meshToc.size     = meshSectionSize;
+    meshToc.reserved = 0;
+    fs.write(reinterpret_cast<const char*>(&meshToc), sizeof(meshToc));
 
-    // Padding
+    // COLL TocEntry (version 2 only)
+    if (hasCollision) {
+        TocEntry collToc{};
+        std::memcpy(collToc.id, "COLL", 4);
+        collToc.offset   = collSectionOffset;
+        collToc.size     = collSectionSize;
+        collToc.reserved = 0;
+        fs.write(reinterpret_cast<const char*>(&collToc), sizeof(collToc));
+    }
+
+    // Padding before MESH section
     padTo64(fs);
 
     // MESH section header
@@ -452,6 +571,31 @@ bool writeEasset(const std::filesystem::path& output,
     fs.write(reinterpret_cast<const char*>(mesh.indices.data()),
              static_cast<std::streamsize>(indexDataSize));
 
+    // COLL section (version 2 only)
+    if (hasCollision) {
+        padTo64(fs);
+
+        CollSectionHeader csh{};
+        csh.collisionType = static_cast<uint8_t>(collision->type);
+        csh.pad[0] = csh.pad[1] = csh.pad[2] = 0;
+        csh.vertexCount   = static_cast<uint32_t>(collision->vertices.size());
+        csh.indexCount    = static_cast<uint32_t>(collision->indices.size());
+        fs.write(reinterpret_cast<const char*>(&csh), sizeof(csh));
+
+        // Position-only vertices (3 floats each)
+        for (const auto& v : collision->vertices) {
+            fs.write(reinterpret_cast<const char*>(v.data()),
+                     static_cast<std::streamsize>(3 * sizeof(float)));
+        }
+
+        // Index buffer (empty for ConvexHull)
+        if (!collision->indices.empty()) {
+            fs.write(reinterpret_cast<const char*>(collision->indices.data()),
+                     static_cast<std::streamsize>(
+                         collision->indices.size() * sizeof(uint32_t)));
+        }
+    }
+
     return fs.good();
 }
 
@@ -464,7 +608,8 @@ bool writeEasset(const std::filesystem::path& output,
 namespace engine::tools {
 
 ImportResult importGltf(const std::filesystem::path& source,
-                        const std::filesystem::path& output) {
+                        const std::filesystem::path& output,
+                        const ImportSettings&        settings) {
     // Attempt to parse the glTF/glb file.  On failure (missing file, invalid
     // format, unsupported primitive) fall back to the built-in unit-cube mesh
     // so that pipeline tests that supply a dummy path still pass.
@@ -484,14 +629,27 @@ ImportResult importGltf(const std::filesystem::path& source,
     // Run meshoptimizer passes over the raw geometry.
     OptimizedMesh optimized = runMeshoptimizer(raw);
 
-    if (!writeEasset(output, optimized)) {
+    // Build optional collision data.
+    CollisionData  collData;
+    CollisionData* collPtr = nullptr;
+    if (settings.generateCollision) {
+        if (settings.collisionType == CollisionType::ConvexHull) {
+            collData = buildConvexHullCollision(optimized);
+        } else {
+            collData = buildTriangleMeshCollision(optimized);
+        }
+        collPtr = &collData;
+    }
+
+    if (!writeEasset(output, optimized, collPtr)) {
         return { false, "Write error while producing: " + output.string() };
     }
 
-    LOG_INFO("importGltf: wrote '{}' ({} vertices, {} indices).",
+    LOG_INFO("importGltf: wrote '{}' ({} vertices, {} indices, collision={}).",
              output.string(),
              static_cast<uint32_t>(optimized.vertices.size()),
-             static_cast<uint32_t>(optimized.indices.size()));
+             static_cast<uint32_t>(optimized.indices.size()),
+             settings.generateCollision ? "yes" : "no");
 
     return { true, {} };
 }
