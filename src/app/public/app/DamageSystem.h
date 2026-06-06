@@ -8,13 +8,13 @@
 #include <networking/NetworkRegistry.h>
 #include <networking/ReplicationSystem.h>
 #include <networking/RPC.h>
+#include <physics/LagCompensator.h>
 
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
 
 namespace engine::core { class EventBus; }
-namespace engine::physics { class PhysicsWorld; }
 
 namespace engine::app {
 
@@ -40,10 +40,11 @@ struct EntityDiedEvent {
 // a ReplicationSystem is provided), then applies damage commutatively: all hits
 // on a target this tick are summed and clamped once, shield absorbs before HP.
 //
-// Pass a non-null replicationSystem to enable lag-comp rewind: entities are
-// temporarily moved to their positions at req.clientTick before the raycast,
-// then restored. If replicationSystem is null or the tick is out of range the
-// raycast falls back to current positions.
+// Pass a non-null replicationSystem to enable lag-comp rewind: entity physics
+// bodies are temporarily moved to their positions at req.clientTick via
+// LagCompensator::rewindAndRaycast(), then restored automatically.
+// If replicationSystem is null or the tick is out of range the raycast falls
+// back to current positions.
 //
 // On a kill the system publishes EntityDiedEvent locally and emits a reliable
 // PlayerDied RPC to all clients.
@@ -106,17 +107,12 @@ private:
         uint32_t                  netId  = 0u;
     };
 
-    // Save/restore buffer for lag-comp rewind: one entry per networked entity.
-    struct SavedTransform {
-        engine::core::ecs::Entity entity;
-        engine::core::Transform   transform;
-    };
-
     engine::core::ecs::World&                    world_;
     engine::physics::PhysicsWorld&               physics_;
     engine::networking::NetworkRegistry&         registry_;
     engine::core::EventBus&                      eventBus_;
     engine::networking::ReplicationSystem* const replication_;
+    engine::physics::LagCompensator              lagComp_;
 
     std::vector<PendingRequest>                  queue_;
     std::unordered_map<uint32_t, uint32_t>       processed_; // serial → serverTick at receipt
@@ -125,12 +121,15 @@ private:
     std::unordered_map<uint8_t, float>       weaponDamage_;
     std::vector<PlayerDiedPayload>           pendingDeathRpcs_;
 
-    // Rewind all networked entity transforms to the positions at `tick`.
-    // Returns false if history is unavailable (caller proceeds without rewind).
-    bool rewindToTick(uint32_t tick, std::vector<SavedTransform>& saved);
-
-    // Restore ECS transforms and physics bodies to the state captured in `saved`.
-    void restoreTransforms(const std::vector<SavedTransform>& saved);
+    // Build an EntityTransformSnapshot list from replication history at `tick`
+    // and invoke LagCompensator::rewindAndRaycast().
+    // Returns an invalid RaycastHit (hasHit == false) when history is
+    // unavailable; the caller should fall back to a live-position raycast.
+    engine::physics::RaycastHit lagCompRaycast(
+        uint32_t                        tick,
+        const engine::core::math::Vec3& origin,
+        const engine::core::math::Vec3& dir,
+        float                           maxDist);
 };
 
 } // namespace engine::app

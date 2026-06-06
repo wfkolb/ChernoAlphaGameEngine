@@ -164,6 +164,17 @@ void PhysicsWorld::setTransformByEntity(Entity entity,
     }
 }
 
+engine::core::Transform PhysicsWorld::getTransformByEntity(Entity entity) const {
+    for (const BodyData& b : impl_->bodies) {
+        if (b.entity != entity) continue;
+        engine::core::Transform t;
+        t.position = b.position;
+        t.rotation = b.rotation;
+        return t;
+    }
+    return {};
+}
+
 void PhysicsWorld::setLinearVelocity(BodyId id, Vec3 v) {
     BodyData* b = impl_->find(id);
     if (b) b->linearVelocity = v;
