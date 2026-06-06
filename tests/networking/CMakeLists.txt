@@ -21,6 +21,7 @@ gtest_discover_tests(networking_tests PROPERTIES LABELS "integration")
 add_executable(networking_unit_tests
     ReplicationTests.cpp
     PredictionTests.cpp
+    RpcValidationTests.cpp
 )
 target_link_libraries(networking_unit_tests PRIVATE
     engine::networking

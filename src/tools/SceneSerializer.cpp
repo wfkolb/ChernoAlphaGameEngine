@@ -97,6 +97,14 @@ void SceneSerializer::clearComponentLoaders() {
     loaders_ = {};
 }
 
+void SceneSerializer::setEntityFactory(core::ecs::EntityFactory* factory) {
+    factory_ = factory;
+}
+
+void SceneSerializer::clearEntityFactory() {
+    factory_ = nullptr;
+}
+
 bool SceneSerializer::save(const core::scene::Scene& scene,
                            const std::filesystem::path& path) {
     if (!scene.isLoaded()) return false;
@@ -432,11 +440,27 @@ bool SceneSerializer::load(core::scene::Scene& scene,
                                  "creating bare entity", prefabPath);
                         e = scene.world().createEntity();
                     }
+                } else if (!archetypeName.empty() && factory_) {
+                    // Reconstruct via EntityFactory: spawn the archetype to
+                    // populate default components, then the component SoA pass
+                    // overwrites only the fields that were explicitly saved
+                    // (delta-apply).
+                    core::ecs::SpawnParams params{};
+                    e = factory_->spawn(archetypeName, params, scene.world());
+                    if (e == core::ecs::kInvalidEntity) {
+                        LOG_WARN("SceneSerializer: archetype '{}' not found in "
+                                 "EntityFactory, creating bare entity",
+                                 archetypeName);
+                        e = scene.world().createEntity();
+                    }
                 } else {
                     e = scene.world().createEntity();
                 }
 
-                if (!archetypeName.empty()) {
+                // Attach the Name component when an archetype name is present
+                // (and the archetype spawn didn't already add one).
+                if (!archetypeName.empty() &&
+                    !scene.world().hasComponent(e, core::ecs::Name::kComponentId)) {
                     core::ecs::Name nm(archetypeName.c_str());
                     scene.world().addComponent<core::ecs::Name>(e, nm);
                 }
