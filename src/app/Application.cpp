@@ -110,8 +110,8 @@ void Application::run() {
                     // section and the entity does not already have one.
                     if (cpuMesh->collision && activeScene) {
                         core::ecs::Entity e{ load.entityIndex, load.entityGeneration };
-                        auto& world = activeScene->world();
-                        if (!world.tryGet<core::ColliderComponent>(e)) {
+                        auto& sceneWorld = activeScene->world();
+                        if (!sceneWorld.tryGet<core::ColliderComponent>(e)) {
                             core::ColliderComponent cc{};
                             if (cpuMesh->collision->type ==
                                 tools::CollisionType::ConvexHull) {
@@ -119,7 +119,7 @@ void Application::run() {
                             } else {
                                 cc.shape = core::ColliderComponent::Shape::TriangleMesh;
                             }
-                            world.addComponent<core::ColliderComponent>(e, cc);
+                            sceneWorld.addComponent<core::ColliderComponent>(e, cc);
                         }
                     }
                 } else {
