@@ -26,93 +26,6 @@ namespace engine::tools {
 
 namespace {
 
-// ── SHA-256 ───────────────────────────────────────────────────────────────────
-
-static uint32_t sha_rotr(uint32_t x, int n) {
-    return (x >> n) | (x << (32 - n));
-}
-
-static std::array<uint8_t, 32> computeSha256(const uint8_t* msg, size_t len) {
-    static constexpr uint32_t K[64] = {
-        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
-        0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
-        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
-        0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
-        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
-        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
-        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u,
-        0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
-        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u,
-        0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
-        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u,
-        0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
-        0x19a4c116u, 0x1e376c08u,  0x2748774cu, 0x34b0bcb5u,
-        0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
-        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
-        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
-    };
-
-    uint32_t h[8] = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
-    };
-
-    // Pad message: append 0x80, zeros, then 64-bit big-endian bit length.
-    const uint64_t bitLen    = static_cast<uint64_t>(len) * 8u;
-    size_t paddedLen = len + 1;
-    while (paddedLen % 64 != 56) ++paddedLen;
-    paddedLen += 8;
-
-    std::vector<uint8_t> padded(paddedLen, 0u);
-    std::memcpy(padded.data(), msg, len);
-    padded[len] = 0x80u;
-    for (int bi = 7; bi >= 0; --bi) {
-        padded[paddedLen - 8 + static_cast<size_t>(7 - bi)] =
-            static_cast<uint8_t>(bitLen >> (bi * 8));
-    }
-
-    for (size_t blk = 0; blk < paddedLen; blk += 64) {
-        uint32_t w[64] = {};
-        for (int i = 0; i < 16; ++i) {
-            w[i] = (static_cast<uint32_t>(padded[blk + static_cast<size_t>(i) * 4    ]) << 24u) |
-                   (static_cast<uint32_t>(padded[blk + static_cast<size_t>(i) * 4 + 1]) << 16u) |
-                   (static_cast<uint32_t>(padded[blk + static_cast<size_t>(i) * 4 + 2]) <<  8u) |
-                    static_cast<uint32_t>(padded[blk + static_cast<size_t>(i) * 4 + 3]);
-        }
-        for (int i = 16; i < 64; ++i) {
-            const uint32_t s0 = sha_rotr(w[i - 15],  7) ^ sha_rotr(w[i - 15], 18) ^ (w[i - 15] >>  3);
-            const uint32_t s1 = sha_rotr(w[i -  2], 17) ^ sha_rotr(w[i -  2], 19) ^ (w[i -  2] >> 10);
-            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-        }
-
-        uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
-        uint32_t e = h[4], f = h[5], g = h[6], hv = h[7];
-
-        for (int i = 0; i < 64; ++i) {
-            const uint32_t S1    = sha_rotr(e,  6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25);
-            const uint32_t ch    = (e & f) ^ (~e & g);
-            const uint32_t temp1 = hv + S1 + ch + K[i] + w[i];
-            const uint32_t S0    = sha_rotr(a,  2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22);
-            const uint32_t maj   = (a & b) ^ (a & c) ^ (b & c);
-            const uint32_t temp2 = S0 + maj;
-
-            hv = g; g = f; f = e; e = d + temp1;
-            d  = c; c = b; b = a; a = temp1 + temp2;
-        }
-        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
-        h[4] += e; h[5] += f; h[6] += g; h[7] += hv;
-    }
-
-    std::array<uint8_t, 32> digest{};
-    for (int i = 0; i < 8; ++i) {
-        digest[static_cast<size_t>(i) * 4    ] = static_cast<uint8_t>(h[i] >> 24);
-        digest[static_cast<size_t>(i) * 4 + 1] = static_cast<uint8_t>(h[i] >> 16);
-        digest[static_cast<size_t>(i) * 4 + 2] = static_cast<uint8_t>(h[i] >>  8);
-        digest[static_cast<size_t>(i) * 4 + 3] = static_cast<uint8_t>(h[i]      );
-    }
-    return digest;
-}
-
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 constexpr size_t      kHeaderSize = 512;
@@ -150,13 +63,6 @@ static void writeGlobals(ByteWriter& bw, const core::scene::SceneGlobals& g) {
     bw.writeU32(static_cast<uint32_t>(g.maxPlayers));
     bw.writeString(g.sceneName);
     bw.writeString(g.gameMode);
-    bw.writeString(g.navmeshAsset);
-    bw.writeU32(static_cast<uint32_t>(g.spawnPoints.size()));
-    for (const auto& sp : g.spawnPoints) {
-        bw.writeF32(sp.x);
-        bw.writeF32(sp.y);
-        bw.writeF32(sp.z);
-    }
 }
 
 static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
@@ -175,18 +81,6 @@ static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
     g.maxPlayers     = static_cast<int>(br.readU32());
     g.sceneName      = br.readString();
     g.gameMode       = br.readString();
-    g.navmeshAsset   = br.readString();
-    if (!g.navmeshAsset.empty()) {
-        LOG_WARN("SceneSerializer: navmeshAsset '{}' loaded but navigation is not "
-                 "implemented; field ignored until Phase 9", g.navmeshAsset);
-    }
-    const uint32_t spCount = br.readU32();
-    g.spawnPoints.resize(spCount);
-    for (uint32_t i = 0; i < spCount; ++i) {
-        g.spawnPoints[i].x = br.readF32();
-        g.spawnPoints[i].y = br.readF32();
-        g.spawnPoints[i].z = br.readF32();
-    }
     return br.ok();
 }
 
@@ -347,21 +241,9 @@ bool SceneSerializer::save(const core::scene::Scene& scene,
 
     // ── 4. Build Asset Ref Table binary ───────────────────────────────────────
 
-    // Collect asset paths referenced in SceneGlobals.
-    std::vector<std::string> assetPaths;
-    if (!globals.navmeshAsset.empty())
-        assetPaths.push_back(globals.navmeshAsset);
-
+    // Asset ref table — placeholder for future external asset dependencies.
     ByteWriter assetRefTable;
-    assetRefTable.writeU32(static_cast<uint32_t>(assetPaths.size()));
-    for (const auto& assetPath : assetPaths) {
-        assetRefTable.writeString(assetPath);
-        // SHA-256 of the path bytes (integrity token for the asset reference).
-        const auto hash = computeSha256(
-            reinterpret_cast<const uint8_t*>(assetPath.data()),
-            assetPath.size());
-        assetRefTable.writeBytes(hash.data(), hash.size());
-    }
+    assetRefTable.writeU32(0u);
 
     // ── 5. Build SceneGlobals binary ──────────────────────────────────────────
 

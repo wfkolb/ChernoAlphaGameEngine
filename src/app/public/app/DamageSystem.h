@@ -73,10 +73,6 @@ public:
     void submitRequest(const engine::networking::HitscanValidationRequest& req,
                        uint8_t weaponType = 0u);
 
-    // Retained for API compatibility; no-op now that rewind reads from the
-    // ReplicationSystem transform history ring.
-    void recordHistory(uint32_t tick, engine::core::math::Vec3 position);
-
     // Process all queued requests: dedup, rewind, raycast, accumulate + apply
     // damage, emit death events/RPCs. Call once per server tick after step().
     void tick();

@@ -101,13 +101,6 @@ TEST(Scene, GlobalsCanBeModified) {
     EXPECT_EQ(s.globals().maxPlayers, 8);
 }
 
-TEST(Scene, GlobalsSpawnPoints) {
-    Scene s;
-    s.load("test");
-    s.globals().spawnPoints.push_back({1.0f, 0.0f, 2.0f});
-    EXPECT_EQ(s.globals().spawnPoints.size(), 1u);
-}
-
 // ── Physics pointer ───────────────────────────────────────────────────────────
 
 TEST(Scene, PhysicsWorldDefaultNull) {

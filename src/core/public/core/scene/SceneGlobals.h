@@ -2,7 +2,6 @@
 
 #include <core/math/Vec.h>
 #include <string>
-#include <vector>
 #include <cstdint>
 
 namespace engine::core::scene {
@@ -24,10 +23,6 @@ struct SceneGlobals {
     float        matchTimeLimit = 0.0f;   // seconds; 0 = no limit
     int          maxPlayers     = 0;
     std::string  gameMode;
-    std::string  navmeshAsset;
-
-    // Spawn points in world space
-    std::vector<math::Vec3> spawnPoints;
 };
 
 } // namespace engine::core::scene

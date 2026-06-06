@@ -91,22 +91,6 @@ bool ScenePropertiesPanel::draw(core::scene::SceneGlobals& g, bool* open) {
     if (ImGui::DragFloat("Fog Density", &g.fogDensity, 0.001f, 0.f, 1.f))
         changed = true;
 
-    // ── Navigation ──────────────────────────────────────────────────────────
-    ImGui::SeparatorText("Navigation");
-
-    char navBuf[512] = {};
-    const size_t navLen = std::min(g.navmeshAsset.size(), sizeof(navBuf) - 1);
-    g.navmeshAsset.copy(navBuf, navLen);
-    ImGui::BeginDisabled(); // navmesh baking not yet implemented (Phase 9)
-    ImGui::InputText("Navmesh Asset", navBuf, sizeof(navBuf));
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextDisabled("(Phase 9)");
-
-    // ── Spawn Points ─────────────────────────────────────────────────────────
-    ImGui::SeparatorText("Spawn Points");
-    ImGui::LabelText("Count", "%zu", g.spawnPoints.size());
-
     ImGui::End();
     return changed;
 }

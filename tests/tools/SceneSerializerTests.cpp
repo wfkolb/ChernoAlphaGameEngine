@@ -278,23 +278,6 @@ TEST_F(SceneSerializerTest, RoundTripSceneGlobals) {
     fs::remove(p);
 }
 
-TEST_F(SceneSerializerTest, RoundTripSpawnPoints) {
-    const fs::path p = tempPath("ss_spawns.scene");
-
-    Scene src;
-    src.load("spawn_map");
-    src.globals().spawnPoints.push_back({1.0f, 0.0f, 2.0f});
-    src.globals().spawnPoints.push_back({5.0f, 0.0f, 5.0f});
-    ASSERT_TRUE(SceneSerializer::save(src, p));
-
-    Scene dst;
-    ASSERT_TRUE(SceneSerializer::load(dst, p));
-    ASSERT_EQ(dst.globals().spawnPoints.size(), 2u);
-    EXPECT_NEAR(dst.globals().spawnPoints[0].x, 1.0f, 1e-5f);
-    EXPECT_NEAR(dst.globals().spawnPoints[1].x, 5.0f, 1e-5f);
-    fs::remove(p);
-}
-
 TEST_F(SceneSerializerTest, RoundTripDefaultGravity) {
     const fs::path p = tempPath("ss_gravity.scene");
 

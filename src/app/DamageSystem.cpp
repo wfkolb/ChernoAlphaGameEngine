@@ -46,10 +46,6 @@ void DamageSystem::submitRequest(
     queue_.push_back({req, weaponType});
 }
 
-void DamageSystem::recordHistory(uint32_t /*tick*/, Vec3 /*position*/) {
-    // No-op: rewind now reads from ReplicationSystem::historyRing_ instead.
-}
-
 void DamageSystem::tick() {
     // Prune dedup entries older than 640 ticks (10 s at 64 Hz) before processing
     // the new batch so the map stays bounded regardless of match length.
