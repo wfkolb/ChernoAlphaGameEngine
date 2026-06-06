@@ -9,7 +9,9 @@ namespace engine::networking {
 // Used by clients to roll back and replay input after server reconciliation.
 class PredictionBuffer {
 public:
-    static constexpr int   kSlots              = 128;
+    static constexpr uint32_t kGameTickHz          = 64u;
+    static constexpr uint32_t kPredictionWindowSec = 2u;
+    static constexpr int      kSlots = static_cast<int>(kGameTickHz * kPredictionWindowSec);
     static constexpr float kReconcileThreshold = 0.05f;  // metres
 
     struct Slot {

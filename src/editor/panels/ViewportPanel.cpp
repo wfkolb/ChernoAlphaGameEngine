@@ -3,15 +3,22 @@
 #include "editor/panels/ViewportPanel.h"
 #include "editor/SelectionSystem.h"
 #include "editor/UndoStack.h"
+#include "editor/commands/ColliderResizeCommand.h"
 #include "editor/commands/TransformCommand.h"
 
 #include <core/ecs/World.h>
+#include <core/ecs/PrefabInstance.h>
+#include <core/components/ColliderComponent.h>
+#include <core/components/Transform.h>
 #include <core/math/Quat.h>
+#include <tools/PrefabSerializer.h>
 
 #include <imgui.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <vector>
 
@@ -108,7 +115,11 @@ void ViewportPanel::handleCameraInput(EditorCamera& camera, bool hovered) {
         in.sprint      = io.KeyShift;
     }
 
-    camera.update(in, io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f);
+    // During PIE the player entity's Transform drives the view matrix; suppress
+    // editor camera movement so the camera doesn't drift while playing.
+    if (!pieActive_) {
+        camera.update(in, io.DeltaTime > 0.0f ? io.DeltaTime : 1.0f / 60.0f);
+    }
 }
 
 void ViewportPanel::drawGizmo(core::ecs::World& world, core::ecs::Entity selected,
@@ -239,6 +250,244 @@ void ViewportPanel::drawOverlays(core::ecs::World& world, const Mat4& viewProj) 
             for (auto& ed : edges) dl->AddLine(s[ed[0]], s[ed[1]], bbCol, 1.0f);
         });
     }
+
+    if (overlays_.colliders) {
+        world.forEachEntity([&](core::ecs::Entity e) {
+            auto* col = world.tryGet<core::ColliderComponent>(e);
+            if (!col) return;
+            auto* tr  = world.tryGet<core::Transform>(e);
+            const Vec3 origin = tr ? tr->position : Vec3{0.f, 0.f, 0.f};
+            const Vec3 off    = { col->offsetX + origin.x,
+                                  col->offsetY + origin.y,
+                                  col->offsetZ + origin.z };
+
+            const ImU32 col32 = col->isTrigger
+                ? IM_COL32(255, 220,  0, 190)   // yellow for triggers
+                : IM_COL32(  0, 230,  0, 190);  // green for solid
+
+            switch (col->shape) {
+                case core::ColliderComponent::Shape::Box: {
+                    const Vec3 h = { col->params.box.halfX,
+                                     col->params.box.halfY,
+                                     col->params.box.halfZ };
+                    const Vec3 corners[8] = {
+                        off + Vec3{-h.x,-h.y,-h.z}, off + Vec3{ h.x,-h.y,-h.z},
+                        off + Vec3{ h.x, h.y,-h.z}, off + Vec3{-h.x, h.y,-h.z},
+                        off + Vec3{-h.x,-h.y, h.z}, off + Vec3{ h.x,-h.y, h.z},
+                        off + Vec3{ h.x, h.y, h.z}, off + Vec3{-h.x, h.y, h.z},
+                    };
+                    const int edges[12][2] = {
+                        {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}
+                    };
+                    for (auto& ed : edges)
+                        drawClippedLine(dl, corners[ed[0]], corners[ed[1]],
+                                        viewProj, originX_, originY_,
+                                        contentWidth_, contentHeight_, col32);
+                    break;
+                }
+                case core::ColliderComponent::Shape::Sphere: {
+                    const float r = col->params.sphere.radius;
+                    constexpr int kSegs = 16;
+                    constexpr float kTwoPi = 6.28318530f;
+                    for (int seg = 0; seg < kSegs; ++seg) {
+                        const float t0 = static_cast<float>(seg)     / kSegs * kTwoPi;
+                        const float t1 = static_cast<float>(seg + 1) / kSegs * kTwoPi;
+                        const float c0 = std::cos(t0), s0 = std::sin(t0);
+                        const float c1 = std::cos(t1), s1 = std::sin(t1);
+                        drawClippedLine(dl, off + Vec3{r*c0,r*s0,0}, off + Vec3{r*c1,r*s1,0},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                        drawClippedLine(dl, off + Vec3{0,r*c0,r*s0}, off + Vec3{0,r*c1,r*s1},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                        drawClippedLine(dl, off + Vec3{r*c0,0,r*s0}, off + Vec3{r*c1,0,r*s1},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                    }
+                    break;
+                }
+                case core::ColliderComponent::Shape::Capsule: {
+                    const float r  = col->params.capsule.radius;
+                    const float hh = col->params.capsule.halfHeight;
+                    const Vec3  top = { off.x, off.y + hh, off.z };
+                    const Vec3  bot = { off.x, off.y - hh, off.z };
+                    constexpr int kSegs = 12;
+                    constexpr float kTwoPi = 6.28318530f;
+                    for (int seg = 0; seg < kSegs; ++seg) {
+                        const float t0 = static_cast<float>(seg)     / kSegs * kTwoPi;
+                        const float t1 = static_cast<float>(seg + 1) / kSegs * kTwoPi;
+                        const float c0 = std::cos(t0), s0 = std::sin(t0);
+                        const float c1 = std::cos(t1), s1 = std::sin(t1);
+                        drawClippedLine(dl, top + Vec3{r*c0,0,r*s0}, top + Vec3{r*c1,0,r*s1},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                        drawClippedLine(dl, bot + Vec3{r*c0,0,r*s0}, bot + Vec3{r*c1,0,r*s1},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                    }
+                    for (int i = 0; i < 4; ++i) {
+                        const float a = static_cast<float>(i) * 0.25f * kTwoPi;
+                        const float ca = std::cos(a), sa = std::sin(a);
+                        drawClippedLine(dl, top + Vec3{r*ca,0,r*sa}, bot + Vec3{r*ca,0,r*sa},
+                                        viewProj, originX_, originY_, contentWidth_, contentHeight_, col32);
+                    }
+                    break;
+                }
+            }
+        });
+    }
+}
+
+void ViewportPanel::drawColliderHandles(core::ecs::World& world,
+                                        core::ecs::Entity selected,
+                                        const Mat4& viewProj,
+                                        UndoStack& undo) {
+    auto* col = world.tryGet<core::ColliderComponent>(selected);
+    if (!col) return;
+    auto* tr  = world.tryGet<core::Transform>(selected);
+    const Vec3 center = tr ? tr->position : Vec3{0.f, 0.f, 0.f};
+    const Vec3 off = { col->offsetX + center.x,
+                       col->offsetY + center.y,
+                       col->offsetZ + center.z };
+
+    // Face-center positions for the 6 handles: +X,-X,+Y,-Y,+Z,-Z (indices 0-5).
+    Vec3 facePos[6];
+    switch (col->shape) {
+        case core::ColliderComponent::Shape::Box:
+            facePos[0] = off + Vec3{ col->params.box.halfX, 0.f, 0.f };
+            facePos[1] = off + Vec3{-col->params.box.halfX, 0.f, 0.f };
+            facePos[2] = off + Vec3{ 0.f,  col->params.box.halfY, 0.f };
+            facePos[3] = off + Vec3{ 0.f, -col->params.box.halfY, 0.f };
+            facePos[4] = off + Vec3{ 0.f, 0.f,  col->params.box.halfZ };
+            facePos[5] = off + Vec3{ 0.f, 0.f, -col->params.box.halfZ };
+            break;
+        case core::ColliderComponent::Shape::Sphere: {
+            const float r = col->params.sphere.radius;
+            facePos[0] = off + Vec3{ r, 0.f, 0.f };
+            facePos[1] = off + Vec3{-r, 0.f, 0.f };
+            facePos[2] = off + Vec3{ 0.f,  r, 0.f };
+            facePos[3] = off + Vec3{ 0.f, -r, 0.f };
+            facePos[4] = off + Vec3{ 0.f, 0.f,  r };
+            facePos[5] = off + Vec3{ 0.f, 0.f, -r };
+            break;
+        }
+        case core::ColliderComponent::Shape::Capsule: {
+            const float r  = col->params.capsule.radius;
+            const float hh = col->params.capsule.halfHeight;
+            facePos[0] = off + Vec3{ r, 0.f, 0.f };
+            facePos[1] = off + Vec3{-r, 0.f, 0.f };
+            facePos[2] = off + Vec3{ 0.f,  hh + r, 0.f };
+            facePos[3] = off + Vec3{ 0.f, -(hh + r), 0.f };
+            facePos[4] = off + Vec3{ 0.f, 0.f,  r };
+            facePos[5] = off + Vec3{ 0.f, 0.f, -r };
+            break;
+        }
+    }
+
+    ImDrawList* dl  = ImGui::GetWindowDrawList();
+    ImGuiIO&    io  = ImGui::GetIO();
+    constexpr float kHandleRadius = 6.0f;
+    constexpr float kHoverRadius  = 10.0f;
+
+    // Axis colours: X=red, Y=green, Z=blue (±pair share the same axis colour).
+    const ImU32 handleCols[6] = {
+        IM_COL32(230, 70, 70, 255),  IM_COL32(230, 70, 70, 255),
+        IM_COL32( 70,220, 70, 255),  IM_COL32( 70,220, 70, 255),
+        IM_COL32( 80,120,240, 255),  IM_COL32( 80,120,240, 255),
+    };
+
+    ImVec2 screenPos[6];
+    bool   visible[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        visible[i] = worldToScreen(facePos[i], viewProj,
+                                   originX_, originY_,
+                                   contentWidth_, contentHeight_,
+                                   screenPos[i]);
+    }
+
+    // Drag logic: start on LMB press over a handle, update until release.
+    if (!colliderDragging_) {
+        for (int i = 0; i < 6; ++i) {
+            if (!visible[i]) continue;
+            const float dx = io.MousePos.x - screenPos[i].x;
+            const float dy = io.MousePos.y - screenPos[i].y;
+            if (dx * dx + dy * dy <= kHoverRadius * kHoverRadius &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !dragging_) {
+                colliderDragging_  = true;
+                colliderHandleIdx_ = i;
+                colliderDragStart_ = *col;
+                break;
+            }
+        }
+    }
+
+    if (colliderDragging_) {
+        // Map screen X delta to size delta along the axis of this handle.
+        // Sign: handles 0,2,4 are + face; 1,3,5 are - face.
+        const float delta = io.MouseDelta.x * 0.005f;
+        const float sign  = (colliderHandleIdx_ % 2 == 0) ? 1.f : -1.f;
+        const float grow  = sign * delta;
+
+        switch (col->shape) {
+            case core::ColliderComponent::Shape::Box:
+                switch (colliderHandleIdx_ / 2) {
+                    case 0: col->params.box.halfX = std::max(0.01f, col->params.box.halfX + grow); break;
+                    case 1: col->params.box.halfY = std::max(0.01f, col->params.box.halfY + grow); break;
+                    case 2: col->params.box.halfZ = std::max(0.01f, col->params.box.halfZ + grow); break;
+                }
+                break;
+            case core::ColliderComponent::Shape::Sphere:
+                col->params.sphere.radius = std::max(0.01f, col->params.sphere.radius + delta);
+                break;
+            case core::ColliderComponent::Shape::Capsule:
+                if (colliderHandleIdx_ / 2 == 1) {
+                    col->params.capsule.halfHeight = std::max(0.01f, col->params.capsule.halfHeight + grow);
+                } else {
+                    col->params.capsule.radius = std::max(0.01f, col->params.capsule.radius + delta);
+                }
+                break;
+        }
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            colliderDragging_ = false;
+            undo.push(std::make_unique<ColliderResizeCommand>(
+                world, selected, colliderDragStart_, *col));
+        }
+    }
+
+    // Draw handles (after drag update so positions reflect live data).
+    for (int i = 0; i < 6; ++i) {
+        if (!visible[i]) continue;
+        const bool active = colliderDragging_ && colliderHandleIdx_ == i;
+        const ImU32 fillCol = active
+            ? IM_COL32(255, 255, 255, 220)
+            : handleCols[i];
+        dl->AddCircleFilled(screenPos[i], kHandleRadius, fillCol);
+        dl->AddCircle(screenPos[i], kHandleRadius, IM_COL32(0, 0, 0, 180), 0, 1.5f);
+    }
+
+    // TODO Phase 9: replace screen-space dot handles with full 3D ImGuizmo::DrawCubes interaction.
+}
+
+void ViewportPanel::handlePrefabDrop(const std::filesystem::path& path,
+                                     core::ecs::World& world,
+                                     core::ecs::Entity& selected) {
+    auto prefabData = engine::tools::PrefabSerializer::load(path);
+    if (!prefabData) return;
+
+    core::ecs::SpawnParams params{};
+    params.position = core::math::Vec3{0.f, 0.f, 0.f};
+
+    core::ecs::Entity e = engine::tools::PrefabSerializer::instantiate(
+        *prefabData, params, world);
+    if (e == core::ecs::kInvalidEntity) return;
+
+    core::ecs::PrefabInstance pi{};
+    const std::string pathStr = path.string();
+    strncpy_s(pi.sourcePrefabPath, sizeof(pi.sourcePrefabPath),
+              pathStr.c_str(), _TRUNCATE);
+    pi.overriddenComponents = 0u;
+    world.addComponent<core::ecs::PrefabInstance>(e, pi);
+
+    selected = e;
+    if (sceneDirty_) *sceneDirty_ = true;
+
+    // TODO Phase 9: push a SpawnPrefabCommand onto the undo stack.
 }
 
 void ViewportPanel::drawOrientationWidget(const core::math::Mat4& view) {
@@ -342,6 +591,19 @@ void ViewportPanel::draw(core::ecs::World& world,
 
     const bool hovered = ImGui::IsItemHovered();
 
+    // PS3 — accept .prefab drag-drop onto the viewport image.
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload =
+                ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+            std::filesystem::path droppedPath(
+                static_cast<const char*>(payload->Data));
+            if (droppedPath.extension() == ".prefab") {
+                handlePrefabDrop(droppedPath, world, selected);
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
     // Build view-projection for overlays/gizmo/picking.
     const float aspect = contentWidth_ / contentHeight_;
     const Mat4 view = camera.viewMatrix();
@@ -352,7 +614,8 @@ void ViewportPanel::draw(core::ecs::World& world,
     handleCameraInput(camera, hovered);
 
     // Left-click in empty space (not dragging gizmo, not orbiting) picks.
-    if (hovered && !dragging_ && !ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
+    if (hovered && !dragging_ && !colliderDragging_ &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         // Rebuild pickables from the world (unit AABB per entity transform).
         std::vector<SelectionSystem::Pickable> picks;
@@ -374,6 +637,7 @@ void ViewportPanel::draw(core::ecs::World& world,
     drawOverlays(world, viewProj);
     if (world.isAlive(selected)) {
         drawGizmo(world, selected, viewProj, undo);
+        drawColliderHandles(world, selected, viewProj, undo);
     }
     drawOrientationWidget(view);
 

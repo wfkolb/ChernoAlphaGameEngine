@@ -7,6 +7,8 @@
 #include <core/math/Mat.h>
 #include <core/math/Frustum.h>
 #include <core/components/Lifetime.h>
+#include <core/components/Transform.h>
+#include <core/ecs/HierarchyComponent.h>
 
 using namespace engine::core::scene;
 using namespace engine::core::math;
@@ -297,6 +299,79 @@ TEST(SceneManager, TickActiveScenes) {
 
     sm.tickActive(0.2f); // should destroy the entity
     EXPECT_FALSE(s->world().isAlive(e));
+}
+
+// ── BVH ───────────────────────────────────────────────────────────────────────
+
+// ── World transform propagation ───────────────────────────────────────────────
+
+TEST(Scene, GetWorldTransformNullForNoTransform) {
+    Scene s;
+    s.load("test");
+    s.activate();
+    Entity e = s.world().createEntity(); // no Transform added
+    s.tick(0.0f);
+    EXPECT_EQ(s.getWorldTransform(e), nullptr);
+}
+
+TEST(Scene, GetWorldTransformRootMatchesLocalTransform) {
+    Scene s;
+    s.load("test");
+    s.activate();
+    Entity e = s.world().createEntity();
+    engine::core::Transform t{};
+    t.position = {3.f, 0.f, 0.f};
+    s.world().addComponent<engine::core::Transform>(e, t);
+    s.tick(0.0f);
+    const auto* wt = s.getWorldTransform(e);
+    ASSERT_NE(wt, nullptr);
+    EXPECT_NEAR(wt->position.x, 3.f, 1e-5f);
+    EXPECT_NEAR(wt->position.y, 0.f, 1e-5f);
+    EXPECT_NEAR(wt->position.z, 0.f, 1e-5f);
+}
+
+TEST(Scene, GetWorldTransformChildComposesWithParent) {
+    // Parent at (1,0,0), child at local (0,2,0) → world (1,2,0).
+    Scene s;
+    s.load("test");
+    s.activate();
+
+    Entity parent = s.world().createEntity();
+    Entity child  = s.world().createEntity();
+
+    engine::core::Transform parentT{};
+    parentT.position = {1.f, 0.f, 0.f};
+    s.world().addComponent<engine::core::Transform>(parent, parentT);
+
+    engine::core::Transform childT{};
+    childT.position = {0.f, 2.f, 0.f};
+    s.world().addComponent<engine::core::Transform>(child, childT);
+
+    s.world().addComponent<engine::core::ecs::HierarchyComponent>(
+        child, engine::core::ecs::HierarchyComponent{});
+    engine::core::ecs::linkChild(s.world(), parent, child);
+
+    s.tick(0.0f);
+
+    const auto* wt = s.getWorldTransform(child);
+    ASSERT_NE(wt, nullptr);
+    EXPECT_NEAR(wt->position.x, 1.f, 1e-4f);
+    EXPECT_NEAR(wt->position.y, 2.f, 1e-4f);
+    EXPECT_NEAR(wt->position.z, 0.f, 1e-4f);
+}
+
+TEST(Scene, GetWorldTransformClearedOnDeactivate) {
+    Scene s;
+    s.load("test");
+    s.activate();
+    Entity e = s.world().createEntity();
+    engine::core::Transform t{};
+    t.position = {1.f, 0.f, 0.f};
+    s.world().addComponent<engine::core::Transform>(e, t);
+    s.tick(0.0f);
+    ASSERT_NE(s.getWorldTransform(e), nullptr);
+    s.deactivate();
+    EXPECT_EQ(s.getWorldTransform(e), nullptr);
 }
 
 // ── BVH ───────────────────────────────────────────────────────────────────────

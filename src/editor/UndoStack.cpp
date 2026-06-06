@@ -16,6 +16,8 @@ void UndoStack::push(std::unique_ptr<ICommand> command) {
     if (undoStack_.size() > kMaxCommands) {
         undoStack_.erase(undoStack_.begin());
     }
+
+    if (onModified_) onModified_();
 }
 
 bool UndoStack::undo() {
@@ -25,6 +27,7 @@ bool UndoStack::undo() {
     undoStack_.pop_back();
     cmd->undo();
     redoStack_.push_back(std::move(cmd));
+    if (onModified_) onModified_();
     return true;
 }
 
@@ -35,6 +38,7 @@ bool UndoStack::redo() {
     redoStack_.pop_back();
     cmd->execute();
     undoStack_.push_back(std::move(cmd));
+    if (onModified_) onModified_();
     return true;
 }
 

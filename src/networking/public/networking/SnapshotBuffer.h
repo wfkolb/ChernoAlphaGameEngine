@@ -41,8 +41,9 @@ private:
         bool                      valid    = false;
     };
 
-    Entry entries_[kSlots];
-    int   head_ = 0;
+    Entry          entries_[kSlots];
+    int            head_              = 0;
+    mutable float  lastExtrapWarnMs_  = -1000.0f;
 };
 
 } // namespace engine::networking

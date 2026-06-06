@@ -1,8 +1,12 @@
 #include "tools/SceneSerializer.h"
 #include "tools/ByteWriter.h"
+#include "tools/PrefabSerializer.h"
 
+#include <core/log.h>
 #include <core/ecs/Archetype.h>
 #include <core/ecs/World.h>
+#include <core/ecs/Name.h>
+#include <core/ecs/PrefabInstance.h>
 #include <core/scene/Scene.h>
 #include <core/scene/SceneGlobals.h>
 
@@ -113,7 +117,7 @@ static std::array<uint8_t, 32> computeSha256(const uint8_t* msg, size_t len) {
 
 constexpr size_t      kHeaderSize = 512;
 constexpr const char* kMagic      = "ENGS";
-constexpr int64_t     kVersion    = 1;
+constexpr int64_t     kVersion    = 2;
 
 // ── Component-mask helpers ────────────────────────────────────────────────────
 
@@ -172,6 +176,10 @@ static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
     g.sceneName      = br.readString();
     g.gameMode       = br.readString();
     g.navmeshAsset   = br.readString();
+    if (!g.navmeshAsset.empty()) {
+        LOG_WARN("SceneSerializer: navmeshAsset '{}' loaded but navigation is not "
+                 "implemented; field ignored until Phase 9", g.navmeshAsset);
+    }
     const uint32_t spCount = br.readU32();
     g.spawnPoints.resize(spCount);
     for (uint32_t i = 0; i < spCount; ++i) {
@@ -222,13 +230,60 @@ bool SceneSerializer::save(const core::scene::Scene& scene,
     entityTable.writeU32(static_cast<uint32_t>(entities.size()));
     for (const auto& archPtr : world.archetypes()) {
         const core::ecs::Archetype& arch = *archPtr;
+
+        // Determine which v2 flags apply to every entity in this archetype.
+        // (All entities in an archetype share the same component mask.)
+        const bool archHasPrefabRef =
+            arch.mask.test(core::ecs::PrefabInstance::kComponentId);
+        const bool archHasArchetypeName =
+            arch.mask.test(core::ecs::Name::kComponentId);
+
+        // Locate column data pointers once per archetype (nullptr when absent).
+        const core::ecs::ComponentMeta& prefabMeta =
+            core::ecs::World::getComponentMeta(core::ecs::PrefabInstance::kComponentId);
+        const core::ecs::ComponentMeta& nameMeta =
+            core::ecs::World::getComponentMeta(core::ecs::Name::kComponentId);
+
+        auto findColData = [&](const core::ecs::Archetype& a,
+                               core::ecs::ComponentTypeId id) -> const uint8_t* {
+            auto it = a.columns.find(id);
+            return (it != a.columns.end()) ? it->second.data() : nullptr;
+        };
+
+        const uint8_t* prefabColData =
+            archHasPrefabRef ? findColData(arch, core::ecs::PrefabInstance::kComponentId)
+                             : nullptr;
+        const uint8_t* nameColData =
+            archHasArchetypeName ? findColData(arch, core::ecs::Name::kComponentId)
+                                 : nullptr;
+
+        const MaskBytes mb = maskToBytes(arch.mask);
         for (uint32_t row = 0; row < arch.rowCount; ++row) {
             const core::ecs::Entity e = arch.entities[row];
             entityTable.writeU32(e.index);
             entityTable.writeU32(e.generation);
             // Component mask (32 bytes)
-            const MaskBytes mb = maskToBytes(arch.mask);
             entityTable.writeBytes(mb.data(), mb.size());
+
+            // v2 extension: prefab-ref flag + optional path string
+            const bool writePrefab = archHasPrefabRef && prefabColData
+                                     && prefabMeta.size > 0;
+            entityTable.writeU8(writePrefab ? 1u : 0u);
+            if (writePrefab) {
+                const auto* pi = reinterpret_cast<const core::ecs::PrefabInstance*>(
+                    prefabColData + row * prefabMeta.size);
+                entityTable.writeString(std::string_view(pi->sourcePrefabPath));
+            }
+
+            // v2 extension: archetype name flag + optional name string
+            const bool writeName = archHasArchetypeName && nameColData
+                                   && nameMeta.size > 0;
+            entityTable.writeU8(writeName ? 1u : 0u);
+            if (writeName) {
+                const auto* nm = reinterpret_cast<const core::ecs::Name*>(
+                    nameColData + row * nameMeta.size);
+                entityTable.writeString(std::string_view(nm->c_str()));
+            }
         }
     }
 
@@ -412,7 +467,10 @@ bool SceneSerializer::load(core::scene::Scene& scene,
 
     const auto magic   = tbl["magic"  ].value<std::string>();
     const auto version = tbl["version"].value<int64_t>();
-    if (!magic || *magic != kMagic || !version || *version != kVersion)
+    if (!magic || *magic != kMagic || !version)
+        return false;
+    const int64_t fileVersion = *version;
+    if (fileVersion != 1 && fileVersion != 2)
         return false;
 
     auto getSectionOffset = [&](const char* name) -> uint64_t {
@@ -462,7 +520,50 @@ bool SceneSerializer::load(core::scene::Scene& scene,
             br.skip(32);  // component mask (ignored — rebuilt by addComponent)
 
             if (!br.ok()) return false;
-            savedEntities.push_back(scene.world().createEntity());
+
+            if (fileVersion == 2) {
+                // Read v2 flags: hasPrefabRef then hasArchetypeName.
+                const uint8_t hasPrefabRef      = br.readU8();
+                std::string   prefabPath;
+                if (hasPrefabRef) {
+                    prefabPath = br.readString();
+                }
+                const uint8_t hasArchetypeName  = br.readU8();
+                std::string   archetypeName;
+                if (hasArchetypeName) {
+                    archetypeName = br.readString();
+                }
+                if (!br.ok()) return false;
+
+                core::ecs::Entity e;
+                if (hasPrefabRef && !prefabPath.empty()) {
+                    // Reconstruct entity structure from prefab, then let the
+                    // component SoA pass overwrite individual components with
+                    // the saved (potentially overridden) values.
+                    auto prefabData = PrefabSerializer::load(prefabPath);
+                    if (prefabData) {
+                        core::ecs::SpawnParams params{};
+                        e = PrefabSerializer::instantiate(*prefabData, params,
+                                                         scene.world());
+                    } else {
+                        LOG_WARN("SceneSerializer: prefab '{}' not found, "
+                                 "creating bare entity", prefabPath);
+                        e = scene.world().createEntity();
+                    }
+                } else {
+                    e = scene.world().createEntity();
+                }
+
+                if (!archetypeName.empty()) {
+                    core::ecs::Name nm(archetypeName.c_str());
+                    scene.world().addComponent<core::ecs::Name>(e, nm);
+                }
+
+                savedEntities.push_back(e);
+            } else {
+                // v1: no flags — create entity directly.
+                savedEntities.push_back(scene.world().createEntity());
+            }
         }
     }
 
@@ -490,10 +591,32 @@ bool SceneSerializer::load(core::scene::Scene& scene,
                 br.skip(compSize);
                 if (!br.ok()) return false;
 
-                // Call loader if registered, otherwise skip (forward compat).
-                if (loader && savedIdx < static_cast<uint32_t>(savedEntities.size())) {
-                    loader(scene.world(), savedEntities[savedIdx],
+                if (savedIdx >= static_cast<uint32_t>(savedEntities.size()))
+                    continue;
+
+                core::ecs::Entity ent = savedEntities[savedIdx];
+
+                // If the entity already has this component (e.g. from prefab
+                // instantiation), overwrite its bytes in-place rather than
+                // adding a duplicate (which would assert).
+                if (scene.world().hasComponent(ent, typeId)) {
+                    const core::ecs::ComponentMeta& meta =
+                        core::ecs::World::getComponentMeta(typeId);
+                    if (meta.size == compSize && compData) {
+                        scene.world().forEachComponentOnEntity(ent,
+                            [&](core::ecs::ComponentTypeId id, void* ptr) {
+                                if (id == typeId)
+                                    std::memcpy(ptr, compData, compSize);
+                            });
+                    }
+                } else if (loader) {
+                    loader(scene.world(), ent,
                            compData, static_cast<size_t>(compSize));
+                } else {
+                    LOG_WARN("SceneSerializer: skipping unknown component type ID {} "
+                             "on saved entity index {}. "
+                             "Was the component registered before loading this scene?",
+                             typeId, savedIdx);
                 }
             }
         }
@@ -541,8 +664,12 @@ bool SceneSerializer::validate(const std::filesystem::path& path) {
 
     const auto magic   = tbl["magic"  ].value<std::string>();
     const auto version = tbl["version"].value<int64_t>();
-    if (!magic || *magic != kMagic || !version || *version != kVersion)
+    if (!magic || *magic != kMagic || !version)
         return false;
+    {
+        const int64_t v = *version;
+        if (v != 1 && v != 2) return false;
+    }
 
     // Verify all five section offsets + sizes are within file bounds.
     const char* sections[] = {

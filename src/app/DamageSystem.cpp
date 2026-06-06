@@ -2,6 +2,7 @@
 
 #include <core/EventBus.h>
 #include <core/components/Transform.h>
+#include <core/log.h>
 #include <physics/PhysicsWorld.h>
 
 #include <algorithm>
@@ -13,14 +14,16 @@ using engine::core::ecs::Entity;
 using engine::core::ecs::kInvalidEntity;
 using engine::core::math::Vec3;
 
-DamageSystem::DamageSystem(engine::core::ecs::World&            world,
-                           engine::physics::PhysicsWorld&       physics,
-                           engine::networking::NetworkRegistry& registry,
-                           engine::core::EventBus&              eventBus)
+DamageSystem::DamageSystem(engine::core::ecs::World&              world,
+                           engine::physics::PhysicsWorld&         physics,
+                           engine::networking::NetworkRegistry&   registry,
+                           engine::core::EventBus&                eventBus,
+                           engine::networking::ReplicationSystem* replicationSystem)
     : world_(world)
     , physics_(physics)
     , registry_(registry)
     , eventBus_(eventBus)
+    , replication_(replicationSystem)
 {}
 
 void DamageSystem::setWeaponDamage(uint8_t weaponType, float damage) {
@@ -43,12 +46,21 @@ void DamageSystem::submitRequest(
     queue_.push_back({req, weaponType});
 }
 
-void DamageSystem::recordHistory(uint32_t tick, Vec3 position) {
-    historyRing_[historyHead_] = HistorySample{tick, position};
-    historyHead_ = (historyHead_ + 1) % kHistoryRing;
+void DamageSystem::recordHistory(uint32_t /*tick*/, Vec3 /*position*/) {
+    // No-op: rewind now reads from ReplicationSystem::historyRing_ instead.
 }
 
 void DamageSystem::tick() {
+    // Prune dedup entries older than 640 ticks (10 s at 64 Hz) before processing
+    // the new batch so the map stays bounded regardless of match length.
+    for (auto it = processed_.begin(); it != processed_.end(); ) {
+        if (serverTick_ - it->second > 640u)
+            it = processed_.erase(it);
+        else
+            ++it;
+    }
+    ++serverTick_;
+
     if (queue_.empty()) return;
 
     // Accumulate damage per target so concurrent hits commute (shotgun pellets,
@@ -66,23 +78,37 @@ void DamageSystem::tick() {
 
         // Dedup by fireSerial — a reliable request may be delivered once, but a
         // resend before ACK can surface twice; ignore repeats.
-        if (!processed_.insert(req.fireSerial).second)
+        if (processed_.count(req.fireSerial))
             continue;
+        processed_[req.fireSerial] = serverTick_;
 
         const Entity claimed = registry_.find(req.targetNetId);
         if (claimed == kInvalidEntity)
             continue;
 
-        // Validate against the live world (Phase 7: no rewind). Normalize the
-        // ray direction defensively; clients send it normalized but quantization
-        // can leave it slightly off unit length.
+        // Normalize the ray direction defensively; clients send it normalized
+        // but quantization can leave it slightly off unit length.
         Vec3 dir = req.direction;
         const float len = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
         if (len < 1e-4f)
             continue;
         dir /= len;
 
+        constexpr float kMaxSinPitch = 0.99985f; // sin(89°)
+        dir.y = std::clamp(dir.y, -kMaxSinPitch, kMaxSinPitch);
+        const float lenAfter = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+        if (lenAfter > 1e-4f) dir /= lenAfter;
+
+        // Rewind networked entity positions to req.clientTick so the raycast
+        // sees the world as the shooting client saw it. If history is unavailable
+        // (replication_ null, or tick too old) the raycast uses live positions.
+        std::vector<SavedTransform> rewindSaved;
+        const bool rewound = rewindToTick(req.clientTick, rewindSaved);
+
         const auto hit = physics_.raycast(req.origin, dir, 1000.0f);
+
+        if (rewound) restoreTransforms(rewindSaved);
+
         if (!hit.hasHit)
             continue;
         if (hit.entity != claimed)
@@ -143,6 +169,40 @@ void DamageSystem::tick() {
             pendingDeathRpcs_.push_back(PlayerDiedPayload{
                 targetNetId, acc.attackerNetId, acc.weaponType, deathPos});
         }
+    }
+}
+
+bool DamageSystem::rewindToTick(uint32_t tick,
+                                std::vector<SavedTransform>& saved)
+{
+    if (!replication_) return false;
+    const networking::TransformHistoryEntry* entry =
+        replication_->getSnapshotAtTick(tick);
+    if (!entry) {
+        LOG_WARN("DamageSystem: tick {} not in rewind history; raycasting "
+                 "against live positions", tick);
+        return false;
+    }
+    saved.reserve(entry->transforms.size());
+    for (const auto& [netId, hist] : entry->transforms) {
+        const core::ecs::Entity e = registry_.find(netId);
+        if (e == core::ecs::kInvalidEntity) continue;
+        auto* current = world_.tryGet<core::Transform>(e);
+        if (!current) continue;
+        saved.push_back({e, *current});
+        *current = hist;
+        physics_.setTransformByEntity(e, hist);
+    }
+    return true;
+}
+
+void DamageSystem::restoreTransforms(const std::vector<SavedTransform>& saved)
+{
+    for (const auto& s : saved) {
+        auto* current = world_.tryGet<core::Transform>(s.entity);
+        if (!current) continue;
+        *current = s.transform;
+        physics_.setTransformByEntity(s.entity, s.transform);
     }
 }
 

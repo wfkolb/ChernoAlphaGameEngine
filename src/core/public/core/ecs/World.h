@@ -51,6 +51,11 @@ namespace engine::core::ecs {
 
         bool hasComponent(Entity e, ComponentTypeId id) const;
 
+        // Add a component by raw bytes. Requires the type to be registered
+        // (size != 0 in registry_) and size to match the registered size.
+        void addComponentRaw(Entity e, ComponentTypeId id,
+                             const void* data, size_t size);
+
         // ---- Iteration ----
 
         void forEachEntity(std::function<void(Entity)> fn) const;

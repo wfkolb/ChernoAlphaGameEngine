@@ -4,7 +4,6 @@
 
 #include <core/scene/Scene.h>
 #include <core/ecs/World.h>
-#include <core/ecs/Name.h>
 
 namespace engine::editor {
 
@@ -20,13 +19,19 @@ void PIEController::captureSnapshot() {
     core::ecs::World& world = scene_->world();
     world.forEachEntity([&](core::ecs::Entity e) {
         EntitySnapshot s;
-        if (auto* nm = world.tryGet<core::ecs::Name>(e)) {
-            s.name = nm->c_str();
-        }
-        if (auto* tr = world.tryGet<core::Transform>(e)) {
-            s.transform    = *tr;
-            s.hasTransform = true;
-        }
+        s.entity = e;
+
+        world.forEachComponentOnEntity(e, [&](core::ecs::ComponentTypeId typeId, void* rawData) {
+            const auto& meta = core::ecs::World::getComponentMeta(typeId);
+            if (meta.size == 0) return;
+
+            ComponentBlob blob;
+            blob.typeId = typeId;
+            blob.bytes.assign(static_cast<uint8_t*>(rawData),
+                              static_cast<uint8_t*>(rawData) + meta.size);
+            s.components.push_back(std::move(blob));
+        });
+
         snapshot_.push_back(std::move(s));
     });
 }
@@ -35,27 +40,28 @@ void PIEController::restoreSnapshot() {
     if (!scene_) return;
 
     core::ecs::World& world = scene_->world();
-    size_t i = 0;
-    world.forEachEntity([&](core::ecs::Entity e) {
-        if (i >= snapshot_.size()) return;
-        const EntitySnapshot& s = snapshot_[i++];
-        if (s.hasTransform) {
-            if (auto* tr = world.tryGet<core::Transform>(e)) {
-                *tr = s.transform;
-            }
+    for (const EntitySnapshot& s : snapshot_) {
+        if (!world.isAlive(s.entity)) continue;
+
+        for (const ComponentBlob& blob : s.components) {
+            const auto& meta = core::ecs::World::getComponentMeta(blob.typeId);
+            if (meta.size == 0) continue; // skip unregistered components
+            world.addComponentRaw(s.entity, blob.typeId, blob.bytes.data(), blob.bytes.size());
         }
-    });
+    }
     snapshot_.clear();
 }
 
 void PIEController::start(core::scene::Scene& scene) {
     if (state_ != State::Stopped) return;
 
-    scene_       = &scene;
-    accumulator_ = 0.0f;
-    playTime_    = 0.0f;
-    simTick_     = 0;
+    scene_            = &scene;
+    accumulator_      = 0.0f;
+    playTime_         = 0.0f;
+    simTick_          = 0;
     captureSnapshot();
+    usePlayerCamera_  = true;
+    captureMouse_     = true;
     state_ = State::Playing;
 }
 
@@ -84,6 +90,8 @@ void PIEController::resume() {
 
 void PIEController::stop() {
     if (state_ == State::Stopped) return;
+    usePlayerCamera_ = false;
+    captureMouse_    = false;
     restoreSnapshot();
     state_       = State::Stopped;
     scene_       = nullptr;

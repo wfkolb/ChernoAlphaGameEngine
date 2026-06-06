@@ -4,8 +4,14 @@
 #include "app/Application.h"
 #include "app/IGame.h"
 #include "app/Engine.h"
+#include "MeshRenderSystem.h"
+#include <physics/PhysicsWorld.h>
+#include <rendering/MeshManager.h>
+#include <tools/EassetLoader.h>
+#include <core/log.h>
 #include <algorithm>
 #include <chrono>
+#include <span>
 
 namespace engine::app {
 
@@ -24,15 +30,44 @@ bool Application::init(const ApplicationDesc& desc) {
 
     if (!engine_->init(cfg)) return false;
 
+    // BW4: create physics world (required by GameLoop and DamageSystem lag-comp).
+    physicsWorld_ = std::make_unique<physics::PhysicsWorld>();
+
+    // BW3: create and init mesh render system. MeshManager itself must be
+    // constructed inside a beginFrame/endFrame pair; it is lazy-initialized in run().
+    meshRenderSystem_ = std::make_unique<MeshRenderSystem>();
+    meshRenderSystem_->init(engine_->device());
+
     context_.world           = &engine_->world();
     context_.systemScheduler = &scheduler_;
+    context_.sceneManager    = &sceneManager_;
 
+    // BW1: wire GameLoop with the PhysicsWorld so serverTick() calls step().
     GameLoop::Desc loopDesc{};
-    loopDesc.scheduler = &scheduler_;
+    loopDesc.scheduler    = &scheduler_;
+    loopDesc.physicsWorld = physicsWorld_.get();
     gameLoop_.init(loopDesc);
 
     game_ = desc.game;
+
+    // Load and wire start scene before onInit so IGame can find it in sceneManager.
+    if (!desc.startScenePath.empty()) {
+        if (core::scene::Scene* s = sceneManager_.load(desc.startScenePath)) {
+            wireScene(*s);
+            sceneManager_.activate(desc.startScenePath);
+        }
+    }
+
     if (game_) game_->onInit(context_);
+
+    hostPort_    = desc.hostPort;
+    connectAddr_ = desc.connectAddr;
+
+    if (hostPort_ != 0) {
+        LOG_INFO("Network mode: hosting on port %u", static_cast<unsigned>(hostPort_));
+    } else if (!connectAddr_.empty()) {
+        LOG_INFO("Network mode: connecting to %s", connectAddr_.c_str());
+    }
 
     initialized_ = true;
     return true;
@@ -48,6 +83,28 @@ void Application::run() {
     auto            prevTime      = Clock::now();
 
     engine_->run([&](core::ecs::World& /*world*/, rendering::FrameGraph& /*fg*/) {
+        // BW3: MeshManager must be constructed while a frame is open (after beginFrame).
+        // Engine::run() calls beginFrame() before this callback.
+        if (!meshManager_) {
+            meshManager_ = std::make_unique<rendering::MeshManager>(engine_->device());
+        }
+
+        // BW2: upload any meshes queued by the mesh-load delegate during scene activation.
+        if (!pendingMeshLoads_.empty()) {
+            for (const auto& load : pendingMeshLoads_) {
+                auto cpuMesh = tools::loadEasset(load.assetPath);
+                if (cpuMesh) {
+                    auto gpuHandle = meshManager_->uploadStatic(
+                        std::span<const rendering::VertexStatic>(cpuMesh->vertices),
+                        std::span<const uint32_t>(cpuMesh->indices));
+                    meshRenderSystem_->registerHandle(load.entityIndex, gpuHandle);
+                } else {
+                    LOG_WARN("Application: failed to load mesh asset '{}'", load.assetPath);
+                }
+            }
+            pendingMeshLoads_.clear();
+        }
+
         auto  now     = Clock::now();
         float frameDt = std::min(Seconds(now - prevTime).count(), kMaxFrameTime);
         prevTime      = now;
@@ -55,6 +112,9 @@ void Application::run() {
         accumulator += frameDt;
 
         while (accumulator >= kFixedDt) {
+            // Tick scene lifetime, world transforms, and dynamic grid (not physics —
+            // GameLoop::serverTick() drives physics via the physicsWorld_ it was given).
+            sceneManager_.tickActive(kFixedDt);
             gameLoop_.serverTick(context_, kFixedDt);
             if (game_) game_->onGameTick(context_, kFixedDt);
             accumulator -= kFixedDt;
@@ -67,6 +127,22 @@ void Application::run() {
 #ifdef ENGINE_DEVREL
         if (game_) game_->onDebugUI(context_);
 #endif
+    });
+}
+
+void Application::wireScene(core::scene::Scene& scene) {
+    // BW1: store physicsWorld pointer on the scene for DamageSystem lag-comp rewind.
+    // Physics stepping is handled by GameLoop::serverTick() (via loopDesc.physicsWorld),
+    // not by Scene::tick(). Setting physicsStepFn here would double-step physics.
+    scene.setPhysicsWorld(physicsWorld_.get());
+
+    // BW2: queue mesh load requests; actual GPU upload runs inside the render frame.
+    scene.setMeshLoadFn([this](core::ecs::Entity e, const std::string& path) {
+        pendingMeshLoads_.push_back({e.index, path});
+    });
+    scene.setMeshUnloadFn([this]() {
+        if (meshRenderSystem_) meshRenderSystem_->clear();
+        pendingMeshLoads_.clear();
     });
 }
 

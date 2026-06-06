@@ -91,6 +91,21 @@ void BVH::build(const std::vector<BVHEntry>& entries) {
     nodes_.resize(static_cast<size_t>(nodeCount));
 }
 
+void BVH::remove(ecs::Entity entity) {
+    const auto before = entries_.size();
+    entries_.erase(
+        std::remove_if(entries_.begin(), entries_.end(),
+            [&](const BVHEntry& e) {
+                return e.entity.index      == entity.index
+                    && e.entity.generation == entity.generation;
+            }),
+        entries_.end());
+
+    if (entries_.size() != before) {
+        build(entries_);
+    }
+}
+
 // ── Ray query ─────────────────────────────────────────────────────────────────
 
 BVHRayHit BVH::query(const Vec3& origin, const Vec3& dir, float maxDist) const noexcept {

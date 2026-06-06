@@ -10,6 +10,8 @@ struct GameModeStateBlob {
     uint8_t data[kMaxBytes] = {};
     uint8_t size             = 0;
 };
+static_assert(sizeof(GameModeStateBlob::data) <= 256,
+    "GameModeStateBlob exceeds 256-byte snapshot packet limit");
 
 struct EntityRecord {
     uint32_t                netId         = 0;

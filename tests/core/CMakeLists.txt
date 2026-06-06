@@ -20,5 +20,7 @@ engine_add_warnings(core_tests)
 gtest_discover_tests(core_tests PROPERTIES LABELS "unit")
 
 add_subdirectory(ecs)
+add_subdirectory(fps)
 add_subdirectory(input)
+add_subdirectory(log)
 add_subdirectory(scene)

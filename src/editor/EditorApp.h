@@ -2,6 +2,8 @@
 #ifdef ENGINE_DEVREL
 
 #include "editor/EditorCamera.h"
+#include "editor/EditorImporter.h"
+#include "editor/EditorPrefs.h"
 #include "editor/SelectionSystem.h"
 #include "editor/UndoStack.h"
 #include "editor/PIEController.h"
@@ -10,11 +12,19 @@
 #include "editor/panels/ViewportPanel.h"
 #include "editor/panels/AssetBrowserPanel.h"
 #include "editor/panels/ConsolePanel.h"
+#include "editor/panels/ScenePropertiesPanel.h"
+#include "editor/panels/PhysicsMaterialsPanel.h"
+#include "editor/panels/CollisionLayerPanel.h"
 
 #include <core/ecs/Entity.h>
 #include <core/scene/SceneManager.h>
+#include <physics/PhysicsMaterialTable.h>
+#include <physics/QueryFilter.h>
+
+#include <core/ecs/EntityFactory.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -46,6 +56,7 @@ public:
     void shutdown();
 
 private:
+    void registerComponents();        // World + SceneSerializer component registration
     void registerComponentWidgets();  // ImGui editors for built-in component types
     void loadPreferences();           // project.toml + editor_prefs.toml
     void buildDockLayout();
@@ -57,10 +68,25 @@ private:
     void newScene();
     void openScene(const std::wstring& path);
     void saveScene(const std::wstring& path);
+    void openSceneDialog();
+    void saveSceneDialog();
+
+    // Returns true if it is safe to discard the current scene (either it is
+    // not dirty, or the user chose Save or Discard in the modal).  When the
+    // scene is dirty this opens an ImGui modal and returns false immediately;
+    // the resolved action is stored in pendingAction_ and executed the next
+    // frame via frame().
+    bool confirmDiscardChanges();
+
+    // Actions that may be deferred until the unsaved-changes modal resolves.
+    enum class PendingAction { None, NewScene, OpenScene, CloseWindow };
+    void executePendingAction();
 
     // ---- Owned subsystems ----
     struct Gpu;                       // hides DX12 + ImGui backend details
     std::unique_ptr<Gpu>              gpu_;
+
+    core::ecs::EntityFactory          entityFactory_;
 
     core::scene::SceneManager         sceneManager_;
     core::scene::Scene*               activeScene_ = nullptr;
@@ -76,21 +102,47 @@ private:
     ViewportPanel                     viewportPanel_;
     AssetBrowserPanel                 assetPanel_;
     ConsolePanel                      consolePanel_;
+    ScenePropertiesPanel              scenePropsPanel_;
+    PhysicsMaterialsPanel             physMatPanel_;
+    CollisionLayerPanel               collisionLayerPanel_;
+
+    physics::PhysicsMaterialTable     physMatTable_;
+    physics::QueryFilter              globalQueryFilter_;
+    EditorImporter                    importer_;
+    EditorPrefs                       prefs_;
+    std::filesystem::path             prefsPath_;
 
     core::ecs::Entity                 selected_ = core::ecs::kInvalidEntity;
 
     // Panel visibility.
-    bool showHierarchy_ = true;
-    bool showInspector_ = true;
-    bool showViewport_  = true;
-    bool showAssets_    = true;
-    bool showConsole_   = true;
+    bool showHierarchy_        = true;
+    bool showInspector_        = true;
+    bool showViewport_         = true;
+    bool showAssets_           = true;
+    bool showConsole_          = true;
+    bool showSceneProps_       = false;
+    bool showPhysMats_         = false;
+    bool showCollisionLayers_  = false;
 
     bool        dockBuilt_      = false;
     bool        running_        = false;
+    bool        sceneDirty_     = false;
     std::string projectName_    = "Untitled Project";
     std::string contentRoot_;
     std::wstring currentScenePath_;
+
+    // E1 — Unsaved-changes modal state.
+    bool          unsavedModalOpen_  = false;
+    PendingAction pendingAction_     = PendingAction::None;
+    std::wstring  pendingOpenPath_;  // path stored while waiting for modal
+    bool          closePromptShown_  = false; // prevents re-opening after Cancel on close
+
+    // E2 — Window title dirty indicator.
+    std::wstring lastWindowTitle_;
+
+    // E8 — Error dialog. Non-empty triggers the modal on the next frame draw.
+    std::string errorMsg_;
+    void drawErrorDialog();
 };
 
 } // namespace engine::editor

@@ -154,6 +154,16 @@ void PhysicsWorld::setTransform(BodyId id, const engine::core::Transform& t) {
     if (b->rb.type == RigidBodyType::Static) impl_->staticDirty = true;
 }
 
+void PhysicsWorld::setTransformByEntity(Entity entity,
+                                         const engine::core::Transform& t) {
+    for (BodyData& b : impl_->bodies) {
+        if (b.entity != entity) continue;
+        b.position = t.position;
+        b.rotation = t.rotation;
+        if (b.rb.type == RigidBodyType::Static) impl_->staticDirty = true;
+    }
+}
+
 void PhysicsWorld::setLinearVelocity(BodyId id, Vec3 v) {
     BodyData* b = impl_->find(id);
     if (b) b->linearVelocity = v;

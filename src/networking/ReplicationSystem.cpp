@@ -156,6 +156,33 @@ void ReplicationSystem::acknowledgeSnapshot(uint32_t seq) noexcept {
     if (seq > ackedSeq_) ackedSeq_ = seq;
 }
 
+void ReplicationSystem::recordTransforms(engine::core::ecs::World& world,
+                                          uint32_t serverTick) {
+    const uint32_t slot = serverTick % kHistoryTicks;
+    TransformHistoryEntry& entry = historyRing_[slot];
+    entry.tick = serverTick;
+    entry.transforms.clear();
+
+    world.forEachEntity([&](engine::core::ecs::Entity e) {
+        const auto* ni = world.tryGet<NetworkIdentity>(e);
+        if (!ni) return;
+        const auto* tr = world.tryGet<engine::core::Transform>(e);
+        if (!tr) return;
+        entry.transforms[ni->netId] = *tr;
+    });
+}
+
+const TransformHistoryEntry* ReplicationSystem::getSnapshotAtTick(
+    uint32_t tick) const noexcept {
+    const uint32_t slot = tick % kHistoryTicks;
+    const TransformHistoryEntry& entry = historyRing_[slot];
+    // Guard against aliased stale data: the slot is valid only if it actually
+    // holds data for the requested tick (not a different tick that maps to the
+    // same slot, and not an uninitialised slot whose tick_ == 0).
+    if (entry.tick != tick || entry.transforms.empty()) return nullptr;
+    return &entry;
+}
+
 bool ReplicationSystem::decodeHeader(SnapshotHeader& out) const {
     if (latestData_.size() < 19u) return false;
     ByteReader br(latestData_.data(), latestData_.size());

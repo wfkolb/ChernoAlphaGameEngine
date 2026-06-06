@@ -5,6 +5,7 @@ add_library(engine_app STATIC
     SystemScheduler.cpp
     GameLoop.cpp
     DamageSystem.cpp
+    MeshRenderSystem.cpp
 )
 
 target_compile_features(engine_app PUBLIC cxx_std_20)
@@ -12,7 +13,8 @@ target_compile_features(engine_app PUBLIC cxx_std_20)
 engine_add_warnings(engine_app)
 
 target_include_directories(engine_app
-    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/public"
+    PUBLIC  "${CMAKE_CURRENT_SOURCE_DIR}/public"
+    PRIVATE "${CMAKE_SOURCE_DIR}/src/rendering/internal"
 )
 
 target_link_libraries(engine_app

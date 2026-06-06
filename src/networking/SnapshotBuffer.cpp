@@ -1,4 +1,5 @@
 #include <networking/SnapshotBuffer.h>
+#include <core/log.h>
 #include <algorithm>
 
 namespace engine::networking {
@@ -33,8 +34,15 @@ bool SnapshotBuffer::sample(float currentTimeMs, const Visitor& visitor) const {
     if (!prev) return false;  // no data at or before target
 
     if (!next) {
-        // Extrapolation: use latest sample if within kMaxExtrapMs
-        if (targetMs - prev->timeMs > kMaxExtrapMs) return false;
+        if (targetMs - prev->timeMs > kMaxExtrapMs) {
+            if (currentTimeMs - lastExtrapWarnMs_ >= 1000.0f) {
+                lastExtrapWarnMs_ = currentTimeMs;
+                LOG_WARN("SnapshotBuffer: extrapolation cap exceeded; holding last position");
+            }
+            for (const auto& es : prev->states)
+                visitor(es.netId, es.transform);
+            return true;
+        }
         for (const auto& es : prev->states)
             visitor(es.netId, es.transform);
         return true;

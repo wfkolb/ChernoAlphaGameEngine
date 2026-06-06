@@ -47,6 +47,12 @@ public:
     engine::core::Transform getTransform(BodyId id) const;
     void setTransform(BodyId id, const engine::core::Transform& t);
 
+    // Move every physics body that belongs to `entity` to `t`. Used by the
+    // lag-compensation rewind to temporarily reposition bodies before a raycast
+    // and by kinematic sync after the ECS hierarchy propagation pass.
+    void setTransformByEntity(engine::core::ecs::Entity entity,
+                              const engine::core::Transform& t);
+
     // Velocity / force (ignored for Static bodies)
     void setLinearVelocity(BodyId id, engine::core::math::Vec3 v);
     engine::core::math::Vec3 getLinearVelocity(BodyId id) const;

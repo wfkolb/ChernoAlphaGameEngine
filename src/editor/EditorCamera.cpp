@@ -65,6 +65,19 @@ void EditorCamera::frame(const Vec3& target, float radius) {
     recomputePosition();
 }
 
+void EditorCamera::setFirstPersonView(const core::math::Vec3& position,
+                                       float yawRad, float pitchRad) noexcept {
+    position_ = position;
+    yaw_      = yawRad;
+    pitch_    = std::clamp(pitchRad, -kPitchLimit, kPitchLimit);
+    // Orbit distance of ~zero keeps focus just in front of the camera so
+    // recomputePosition() does not displace position_ significantly.
+    distance_ = 0.001f;
+    const Quat rot     = core::math::fromEulerYxz(yaw_, pitch_, 0.0f);
+    const Vec3 forward = core::math::rotate(rot, Vec3{0.0f, 0.0f, -1.0f});
+    focus_ = position_ + forward;
+}
+
 core::math::Mat4 EditorCamera::viewMatrix() const {
     return core::math::lookAtRh(position_, focus_, Vec3{0.0f, 1.0f, 0.0f});
 }

@@ -2,10 +2,8 @@
 #ifdef ENGINE_DEVREL
 
 #include <core/ecs/Entity.h>
-#include <core/components/Transform.h>
 
 #include <cstdint>
-#include <string>
 #include <vector>
 
 namespace engine::core::scene { class Scene; }
@@ -45,22 +43,35 @@ public:
     uint32_t simTick()     const noexcept { return simTick_; }
     float    playTime()    const noexcept { return playTime_; }
 
+    void setPiePort(uint16_t port) noexcept { piePort_ = port; }
+
+    // True while play is active: the viewport should use the player entity's
+    // Transform for the view matrix and suppress editor-camera WASD input.
+    bool isUsingPlayerCamera() const noexcept { return usePlayerCamera_; }
+    bool isCapturingMouse()    const noexcept { return captureMouse_; }
+
 private:
+    struct ComponentBlob {
+        core::ecs::ComponentTypeId typeId;
+        std::vector<uint8_t>       bytes;
+    };
     struct EntitySnapshot {
-        std::string     name;
-        core::Transform transform;
-        bool            hasTransform = false;
+        core::ecs::Entity          entity;
+        std::vector<ComponentBlob> components;
     };
 
     void captureSnapshot();
     void restoreSnapshot();
 
-    core::scene::Scene*          scene_ = nullptr;
-    State                        state_ = State::Stopped;
-    std::vector<EntitySnapshot>  snapshot_;
-    float                        accumulator_ = 0.0f;
-    float                        playTime_    = 0.0f;
-    uint32_t                     simTick_     = 0;
+    core::scene::Scene*           scene_ = nullptr;
+    State                         state_ = State::Stopped;
+    uint16_t                      piePort_          = 57300;
+    std::vector<EntitySnapshot>   snapshot_;
+    float                         accumulator_      = 0.0f;
+    float                         playTime_         = 0.0f;
+    uint32_t                      simTick_          = 0;
+    bool                          usePlayerCamera_  = false;
+    bool                          captureMouse_     = false;
 };
 
 } // namespace engine::editor

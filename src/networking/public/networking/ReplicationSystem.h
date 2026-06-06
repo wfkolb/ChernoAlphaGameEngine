@@ -6,10 +6,21 @@
 #include <core/ecs/World.h>
 #include <core/components/Transform.h>
 #include <core/components/Health.h>
+#include <array>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace engine::networking {
+
+// One slot in the server-side transform history ring.
+// Populated each server tick via recordTransforms(); used by DamageSystem for
+// lag-compensation rewind.
+struct TransformHistoryEntry {
+    uint32_t tick = 0u;
+    // netId → Transform at this tick
+    std::unordered_map<uint32_t, engine::core::Transform> transforms;
+};
 
 // Builds delta-compressed entity snapshots at ~20 Hz (every 3 fixed ticks).
 // Wire format per snapshot:
@@ -24,10 +35,23 @@ public:
     static constexpr int   kRingSize   = 32;
     static constexpr float kSnapshotHz = 20.0f;
 
+    // Number of server ticks of transform history retained for lag compensation.
+    // 64 ticks at 64 Hz = 1 second, covering all realistic client latencies.
+    static constexpr uint32_t kHistoryTicks = 64u;
+
     void init();
 
     // Advance time by dt. Returns true when a new snapshot is produced (~20 Hz).
     bool tick(engine::core::ecs::World& world, float dt);
+
+    // Record all networked entity transforms for `serverTick`. Call once per
+    // server physics tick (64 Hz) to keep the history ring current.
+    // Only entities with NetworkIdentity + Transform are stored.
+    void recordTransforms(engine::core::ecs::World& world, uint32_t serverTick);
+
+    // Return the history entry for `tick`, or nullptr if `tick` is older than
+    // the oldest retained entry (more than kHistoryTicks ticks ago).
+    const TransformHistoryEntry* getSnapshotAtTick(uint32_t tick) const noexcept;
 
     // Decode the latest snapshot header fields for inspection.
     struct SnapshotHeader {
@@ -57,6 +81,10 @@ private:
     bool     hasLatest_   = false;
 
     std::vector<uint8_t> latestData_;
+
+    // Ring buffer of transform snapshots, one per server tick.
+    // Slot index = tick % kHistoryTicks.
+    std::array<TransformHistoryEntry, kHistoryTicks> historyRing_ = {};
 
     void buildSnapshot(engine::core::ecs::World& world);
 };

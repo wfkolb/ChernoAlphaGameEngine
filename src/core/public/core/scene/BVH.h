@@ -35,6 +35,10 @@ public:
     void build(const std::vector<BVHEntry>& entries);
     void clear() noexcept;
 
+    // Remove an entity from the BVH and rebuild. O(n) but acceptable for
+    // static destruction events (< 2000 statics, rare during gameplay).
+    void remove(ecs::Entity entity);
+
     bool empty() const noexcept { return nodes_.empty(); }
     int  entryCount() const noexcept { return static_cast<int>(entries_.size()); }
 

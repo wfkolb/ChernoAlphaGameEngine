@@ -1,6 +1,7 @@
 #pragma once
 #ifdef ENGINE_DEVREL
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -48,9 +49,14 @@ public:
     const char* peekUndoName() const;
     const char* peekRedoName() const;
 
+    // Called after every push, undo, or redo so the editor can track dirty state.
+    using DirtyFn = std::function<void()>;
+    void setOnModified(DirtyFn fn) { onModified_ = std::move(fn); }
+
 private:
     std::vector<std::unique_ptr<ICommand>> undoStack_;
     std::vector<std::unique_ptr<ICommand>> redoStack_;
+    DirtyFn                                onModified_;
 };
 
 } // namespace engine::editor

@@ -2,6 +2,7 @@
 #ifdef ENGINE_DEVREL
 
 #include <core/ecs/Entity.h>
+#include <core/ecs/PrefabInstance.h>
 
 #include <array>
 #include <functional>
@@ -21,6 +22,7 @@ public:
 
     void registerWidget(core::ecs::ComponentTypeId id, Widget widget);
     const Widget* find(core::ecs::ComponentTypeId id) const;
+    bool          hasWidget(core::ecs::ComponentTypeId id) const noexcept;
 
 private:
     std::array<Widget, 256> widgets_{};
@@ -36,6 +38,14 @@ public:
 
 private:
     void drawAddComponentMenu(core::ecs::World& world, core::ecs::Entity e);
+
+    // Loads the prefab at pi.sourcePrefabPath and restores the baseline bytes
+    // for componentId onto entity. No-ops (with LOG_WARN) if the prefab cannot
+    // be loaded or does not contain the requested component.
+    void revertComponentToPrefab(core::ecs::World& world,
+                                 core::ecs::Entity entity,
+                                 const core::ecs::PrefabInstance& pi,
+                                 core::ecs::ComponentTypeId componentId);
 
     ComponentEditorRegistry* registry_;
 };

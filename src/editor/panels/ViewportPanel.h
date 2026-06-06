@@ -6,9 +6,11 @@
 #include <core/ecs/Entity.h>
 #include <core/math/Mat.h>
 #include <core/math/Vec.h>
+#include <core/components/ColliderComponent.h>
 #include <core/components/Transform.h>
 
 #include <cstdint>
+#include <filesystem>
 
 namespace engine::core::ecs { class World; }
 
@@ -54,15 +56,29 @@ public:
     void      setGizmoOp(GizmoOp op) noexcept { gizmoOp_ = op; }
     bool      snapEnabled() const noexcept { return snapEnabled_; }
 
+    // When true, WASD/look camera input is suppressed so the PIE player
+    // entity's Transform drives the viewport view matrix instead.
+    void setPieActive(bool active) noexcept { pieActive_ = active; }
+
+    // Optional pointer to the editor dirty flag, set by EditorApp.
+    void setSceneDirty(bool* flag) noexcept { sceneDirty_ = flag; }
+
 private:
     void handleCameraInput(EditorCamera& camera, bool hovered);
     void drawGizmo(core::ecs::World& world,
                    core::ecs::Entity selected,
                    const core::math::Mat4& viewProj,
                    UndoStack& undo);
+    void drawColliderHandles(core::ecs::World& world,
+                             core::ecs::Entity selected,
+                             const core::math::Mat4& viewProj,
+                             UndoStack& undo);
     void drawOverlays(core::ecs::World& world,
                       const core::math::Mat4& viewProj);
     void drawOrientationWidget(const core::math::Mat4& view);
+    void handlePrefabDrop(const std::filesystem::path& path,
+                          core::ecs::World& world,
+                          core::ecs::Entity& selected);
 
     Overlays overlays_;
     GizmoOp  gizmoOp_      = GizmoOp::Translate;
@@ -77,6 +93,9 @@ private:
     float originY_       = 0.0f;
     bool  focused_       = false;
 
+    bool pieActive_   = false;
+    bool* sceneDirty_ = nullptr;
+
     // Gizmo drag state (one drag => one undo command).
     bool            dragging_            = false;
     core::Transform dragStart_{};
@@ -84,6 +103,11 @@ private:
     // Camera drag state — stays true while right mouse is held, even after the
     // cursor leaves the viewport item rect.
     bool            cameraRightDragging_ = false;
+
+    // Collider handle drag state.
+    bool                    colliderDragging_   = false;
+    int                     colliderHandleIdx_  = -1;  // 0..5 = ±X,±Y,±Z
+    core::ColliderComponent colliderDragStart_{};
 };
 
 } // namespace engine::editor

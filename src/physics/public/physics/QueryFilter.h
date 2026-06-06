@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 
 namespace engine::physics {
 
@@ -40,5 +41,10 @@ struct QueryFilter {
         return f;
     }
 };
+
+// Load layer names and collision matrix from a TOML file written by
+// CollisionLayerPanel::save(). Returns false on parse failure.
+bool loadQueryFilterFromToml(QueryFilter& filter,
+                             const std::filesystem::path& path);
 
 } // namespace engine::physics

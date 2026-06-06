@@ -3,6 +3,7 @@ include(GoogleTest)
 
 add_subdirectory(app)
 add_subdirectory(core)
+add_subdirectory(editor)
 add_subdirectory(networking)
 add_subdirectory(physics)
 add_subdirectory(rendering)

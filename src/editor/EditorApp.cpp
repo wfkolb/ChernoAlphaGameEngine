@@ -11,6 +11,24 @@
 #include <imgui_impl_win32.h>
 
 #include "editor/EditorApp.h"
+#include "editor/FileDialog.h"
+#include "editor/commands/SaveAsPrefabCommand.h"
+#include "editor/component_widgets/ColliderWidget.h"
+#include "editor/component_widgets/AnimationStateWidget.h"
+#include "editor/component_widgets/PrefabInstanceWidget.h"
+
+#include <core/components/ColliderComponent.h>
+#include <core/components/AnimationState.h>
+#include <core/components/MeshHandle.h>
+#include <core/ecs/HierarchyComponent.h>
+#include <core/ecs/PrefabInstance.h>
+#include <core/ecs/View.h>
+#include <core/input/InputReceiverComponent.h>
+#include <core/math/Quat.h>
+#include <physics/RigidBody.h>
+#include <physics/CharacterController.h>
+#include <tools/SceneSerializer.h>
+#include <tools/PrefabSerializer.h>
 
 #include <wrl/client.h>
 
@@ -31,6 +49,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 
 // imgui_impl_win32.h guards this declaration in #if 0 to avoid pulling in
 // <windows.h>. Forward-declare it here per imgui's documented usage pattern.
@@ -190,6 +209,10 @@ bool EditorApp::init() {
     // --- Editor state ---
     inspectorPanel_ = std::make_unique<InspectorPanel>(componentRegistry_);
     registerComponentWidgets();
+
+    undo_.setOnModified([this]() { sceneDirty_ = true; });
+
+    registerComponents();
     loadPreferences();
     newScene();
 
@@ -199,23 +222,131 @@ bool EditorApp::init() {
 }
 
 void EditorApp::loadPreferences() {
-    // project.toml / editor_prefs.toml are loaded best-effort via the engine
-    // Config system; missing files fall back to defaults.
     tools::Config::init();
     projectName_ = tools::Config::getString("project", "name", "Untitled Project");
     contentRoot_ = tools::Config::getString("project", "contentRoot", "");
 
     if (!contentRoot_.empty()) {
         assetPanel_.setRoot(contentRoot_);
+
+        // Load physics material and collision layer configs from the content root.
+        const std::string physMatPath = contentRoot_ + "/config/physics_materials.toml";
+        physMatTable_.load(physMatPath);
+
+        const std::string layersPath = contentRoot_ + "/config/collision_layers.toml";
+        loadQueryFilterFromToml(globalQueryFilter_, layersPath);
+
+        prefsPath_ = std::filesystem::path(contentRoot_) / "editor_prefs.toml";
+        prefs_.loadFromDisk(prefsPath_);
+        pie_.setPiePort(prefs_.piePort());
+
+        // PS5 — Scan assets/ for .prefab files and register each one with the
+        // entity factory so they can be spawned by name at runtime.
+        try {
+            const std::filesystem::path assetsDir =
+                std::filesystem::path(contentRoot_) / "assets";
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(assetsDir)) {
+                if (!entry.is_regular_file()) continue;
+                if (entry.path().extension() != ".prefab") continue;
+
+                const std::string stemName  = entry.path().stem().string();
+                const std::filesystem::path prefabPath = entry.path();
+
+                entityFactory_.registerArchetype(
+                    stemName,
+                    [prefabPath](core::ecs::Entity /*e*/,
+                                 const core::ecs::SpawnParams& params,
+                                 core::ecs::World& world) {
+                        auto data = tools::PrefabSerializer::load(prefabPath);
+                        if (data) {
+                            tools::PrefabSerializer::instantiate(*data, params, world);
+                        }
+                    });
+            }
+        } catch (const std::filesystem::filesystem_error& /*e*/) {
+            // assets/ directory may not exist yet — silently skip.
+        }
     }
+
     assetPanel_.setOpenSceneCallback([this](const std::filesystem::path& p) {
         openScene(p.wstring());
     });
+    assetPanel_.setImportCallback([this](const std::filesystem::path& sourcePath) {
+        if (contentRoot_.empty()) return;
+        AssetImportSettings settings{};
+        const std::filesystem::path outputDir = std::filesystem::path(contentRoot_) / "meshes";
+        if (!importer_.beginImport(sourcePath, outputDir, settings)) {
+            consolePanel_.log(ConsolePanel::Level::Warning, "Import already in progress");
+        }
+    });
+    assetPanel_.setImportWithSettingsCallback(
+        [this](const std::filesystem::path& sourcePath, const AssetImportSettings& settings) {
+            if (contentRoot_.empty()) return;
+            const std::filesystem::path outputDir =
+                std::filesystem::path(contentRoot_) / "meshes";
+            if (!importer_.beginImport(sourcePath, outputDir, settings)) {
+                consolePanel_.log(ConsolePanel::Level::Warning, "Import already in progress");
+            }
+        });
+    assetPanel_.setInstantiatePrefabCallback([this](const std::filesystem::path& prefabPath) {
+        if (!activeScene_) return;
+        auto data = tools::PrefabSerializer::load(prefabPath);
+        if (!data) {
+            consolePanel_.log(ConsolePanel::Level::Error, "Failed to load prefab");
+            return;
+        }
+        core::ecs::SpawnParams params{};
+        core::ecs::Entity root = tools::PrefabSerializer::instantiate(
+            *data, params, activeScene_->world());
+        if (root != core::ecs::kInvalidEntity) {
+            core::ecs::PrefabInstance pi{};
+            const std::string relPath = prefabPath.filename().string();
+            strncpy_s(pi.sourcePrefabPath, sizeof(pi.sourcePrefabPath),
+                      relPath.c_str(), _TRUNCATE);
+            activeScene_->world().addComponent<core::ecs::PrefabInstance>(root, pi);
+            selected_ = root;
+            sceneDirty_ = true;
+            consolePanel_.log(ConsolePanel::Level::Info, "Prefab instantiated");
+        }
+    });
+
+    hierarchyPanel_.setEntityFactory(&entityFactory_, &sceneDirty_);
+    hierarchyPanel_.setSaveAsPrefabCallback(
+        [this](core::ecs::Entity entity, core::ecs::World& world) {
+            const auto path = FileDialog::saveFile(
+                L"Prefab Files\0*.prefab\0All Files\0*.*\0",
+                L"prefab",
+                L"Save as Prefab");
+            if (path.empty()) return;
+            const std::filesystem::path fsPath(path);
+            tools::PrefabSerializer::PrefabData data =
+                tools::PrefabSerializer::capture(entity, world);
+            data.name = fsPath.stem().string();
+            if (tools::PrefabSerializer::save(data, fsPath)) {
+                undo_.push(std::make_unique<SaveAsPrefabCommand>(fsPath));
+                assetPanel_.refresh();
+                sceneDirty_ = true;
+                char buf[512];
+                std::snprintf(buf, sizeof(buf), "Saved prefab: %s",
+                              fsPath.filename().string().c_str());
+                consolePanel_.log(ConsolePanel::Level::Info, buf);
+            } else {
+                consolePanel_.log(ConsolePanel::Level::Error, "Failed to save prefab");
+            }
+        });
 
     consolePanel_.log(ConsolePanel::Level::Info, "Editor initialized");
 }
 
 void EditorApp::newScene() {
+    // E1 — Guard against discarding unsaved changes.
+    if (sceneDirty_) {
+        pendingAction_ = PendingAction::NewScene;
+        confirmDiscardChanges();
+        return;
+    }
+
     sceneManager_.unload("EditorScene");
     activeScene_ = sceneManager_.load("EditorScene");   // load() also calls Scene::load()
     if (activeScene_) {
@@ -223,23 +354,177 @@ void EditorApp::newScene() {
     }
     selected_ = core::ecs::kInvalidEntity;
     undo_.clear();
+    sceneDirty_ = false;
     currentScenePath_.clear();
     consolePanel_.log(ConsolePanel::Level::Info, "New scene created");
 }
 
 void EditorApp::openScene(const std::wstring& path) {
-    // Scene file loading is delegated to tools::SceneSerializer by the host;
-    // here we just record the path and log. Full deserialize wiring lives in the
-    // serializer task and is invoked through the asset browser callback.
+    if (path.empty()) return;
+
+    // E1 — Guard against discarding unsaved changes.
+    if (sceneDirty_) {
+        pendingOpenPath_ = path;
+        pendingAction_   = PendingAction::OpenScene;
+        confirmDiscardChanges();
+        return;
+    }
+
+    const std::filesystem::path fsPath(path);
+
+    // E3 / E8 — Validate before destroying the current scene.
+    if (!tools::SceneSerializer::validate(fsPath)) {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "Cannot open scene: file is corrupt or has an invalid format.\n%ls", path.c_str());
+        consolePanel_.log(ConsolePanel::Level::Error, buf);
+        errorMsg_ = buf;
+        ImGui::OpenPopup("##ErrorDlg");
+        return;
+    }
+
+    sceneManager_.unload("EditorScene");
+    activeScene_ = sceneManager_.load("EditorScene");
+    if (!activeScene_) {
+        consolePanel_.log(ConsolePanel::Level::Error, "Failed to create scene slot");
+        return;
+    }
+
+    if (!tools::SceneSerializer::load(*activeScene_, fsPath)) {
+        consolePanel_.log(ConsolePanel::Level::Error, "Failed to load scene file");
+        errorMsg_ = "Failed to load scene file. The file may be corrupt or partially written.";
+        ImGui::OpenPopup("##ErrorDlg");
+        sceneManager_.unload("EditorScene");
+        activeScene_ = nullptr;
+        newScene();
+        return;
+    }
+
+    sceneManager_.activate("EditorScene");
+    selected_ = core::ecs::kInvalidEntity;
+    undo_.clear();
+    sceneDirty_ = false;
     currentScenePath_ = path;
+
+    // E8 — Warn on partial load: file is non-trivial in size but the world
+    // ended up with zero entities, which likely means a section was truncated.
+    {
+        std::error_code ec;
+        const auto fileSize = std::filesystem::file_size(fsPath, ec);
+        if (!ec && fileSize > 512) {
+            uint32_t count = 0;
+            activeScene_->world().forEachEntity([&count](core::ecs::Entity) { ++count; });
+            if (count == 0) {
+                errorMsg_ = "Scene loaded but contains no entities. The file may have been partially written.";
+                ImGui::OpenPopup("##ErrorDlg");
+            }
+        }
+    }
+
+    if (!prefsPath_.empty()) {
+        prefs_.addRecentScene(fsPath);
+        prefs_.saveToDisk(prefsPath_);
+    }
+
     char buf[512];
-    std::snprintf(buf, sizeof(buf), "Open scene requested");
+    std::snprintf(buf, sizeof(buf), "Opened: %ls", path.c_str());
     consolePanel_.log(ConsolePanel::Level::Info, buf);
 }
 
 void EditorApp::saveScene(const std::wstring& path) {
+    if (path.empty()) {
+        saveSceneDialog();
+        return;
+    }
+
+    if (!activeScene_) {
+        consolePanel_.log(ConsolePanel::Level::Error, "No active scene to save");
+        return;
+    }
+
+    const std::filesystem::path fsPath(path);
+    if (!tools::SceneSerializer::save(*activeScene_, fsPath)) {
+        consolePanel_.log(ConsolePanel::Level::Error, "Failed to save scene file");
+        errorMsg_ = "Failed to save scene. Check that the disk is not full and the path is writable.";
+        ImGui::OpenPopup("##ErrorDlg");
+        return;
+    }
+
     currentScenePath_ = path;
-    consolePanel_.log(ConsolePanel::Level::Info, "Save scene requested");
+    sceneDirty_ = false;
+
+    if (!prefsPath_.empty()) {
+        prefs_.addRecentScene(fsPath);
+        prefs_.saveToDisk(prefsPath_);
+    }
+
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "Saved: %ls", path.c_str());
+    consolePanel_.log(ConsolePanel::Level::Info, buf);
+}
+
+void EditorApp::openSceneDialog() {
+    const auto p = FileDialog::openFile(
+        L"Scene Files\0*.scene\0All Files\0*.*\0",
+        L"Open Scene");
+    if (!p.empty()) openScene(p.wstring());
+}
+
+void EditorApp::saveSceneDialog() {
+    const auto p = FileDialog::saveFile(
+        L"Scene Files\0*.scene\0All Files\0*.*\0",
+        L"scene",
+        L"Save Scene");
+    if (!p.empty()) saveScene(p.wstring());
+}
+
+// ---------------------------------------------------------------------------
+// E1 — Unsaved-changes modal
+// ---------------------------------------------------------------------------
+bool EditorApp::confirmDiscardChanges() {
+    // If there is nothing to guard, the action can proceed immediately.
+    if (!sceneDirty_) return true;
+
+    // Open the modal (idempotent if already open).
+    if (!unsavedModalOpen_) {
+        ImGui::OpenPopup("##UnsavedChanges");
+        unsavedModalOpen_ = true;
+    }
+    return false; // resolved asynchronously via the modal drawn in frame()
+}
+
+void EditorApp::executePendingAction() {
+    const PendingAction action = pendingAction_;
+    const std::wstring  path   = pendingOpenPath_;
+    pendingAction_    = PendingAction::None;
+    pendingOpenPath_.clear();
+    unsavedModalOpen_ = false;
+
+    switch (action) {
+    case PendingAction::NewScene:
+        // sceneDirty_ is already false at this point; recurse safely.
+        newScene();
+        break;
+    case PendingAction::OpenScene:
+        openScene(path);
+        break;
+    case PendingAction::CloseWindow:
+        running_ = false;
+        break;
+    default:
+        break;
+    }
+}
+
+void EditorApp::drawErrorDialog() {
+    if (ImGui::BeginPopupModal("##ErrorDlg", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(errorMsg_.c_str());
+        ImGui::Spacing();
+        if (ImGui::Button("OK")) {
+            errorMsg_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void EditorApp::buildDockLayout() {
@@ -316,10 +601,21 @@ void EditorApp::drawMenuBar() {
 
 void EditorApp::drawMenuBarItems() {
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("New Scene", "Ctrl+N")) newScene();
-        if (ImGui::MenuItem("Save Scene", "Ctrl+S")) saveScene(currentScenePath_);
+        if (ImGui::MenuItem("New Scene",     "Ctrl+N"))       newScene();
+        if (ImGui::MenuItem("Open Scene...", "Ctrl+O"))       openSceneDialog();
         ImGui::Separator();
-        if (ImGui::MenuItem("Exit")) running_ = false;
+        if (ImGui::MenuItem("Save Scene",    "Ctrl+S"))       saveScene(currentScenePath_);
+        if (ImGui::MenuItem("Save Scene As...","Ctrl+Shift+S")) saveSceneDialog();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit")) {
+            if (!sceneDirty_) {
+                running_ = false;
+            } else {
+                pendingAction_    = PendingAction::CloseWindow;
+                closePromptShown_ = true;
+                confirmDiscardChanges();
+            }
+        }
         ImGui::EndMenu();
     }
 
@@ -330,11 +626,15 @@ void EditorApp::drawMenuBarItems() {
     }
 
     if (ImGui::BeginMenu("Window")) {
-        ImGui::MenuItem("Hierarchy", nullptr, &showHierarchy_);
-        ImGui::MenuItem("Inspector", nullptr, &showInspector_);
-        ImGui::MenuItem("Viewport",  nullptr, &showViewport_);
-        ImGui::MenuItem("Assets",    nullptr, &showAssets_);
-        ImGui::MenuItem("Console",   nullptr, &showConsole_);
+        ImGui::MenuItem("Hierarchy",          nullptr, &showHierarchy_);
+        ImGui::MenuItem("Inspector",          nullptr, &showInspector_);
+        ImGui::MenuItem("Viewport",           nullptr, &showViewport_);
+        ImGui::MenuItem("Assets",             nullptr, &showAssets_);
+        ImGui::MenuItem("Console",            nullptr, &showConsole_);
+        ImGui::Separator();
+        ImGui::MenuItem("Scene Properties",   nullptr, &showSceneProps_);
+        ImGui::MenuItem("Physics Materials",  nullptr, &showPhysMats_);
+        ImGui::MenuItem("Collision Layers",   nullptr, &showCollisionLayers_);
         ImGui::EndMenu();
     }
 
@@ -351,9 +651,10 @@ void EditorApp::drawMenuBarItems() {
 
     // Status on the right.
     char status[128];
-    std::snprintf(status, sizeof(status), "%s%s",
+    std::snprintf(status, sizeof(status), "%s%s%s",
                   projectName_.c_str(),
-                  pie_.isPlaying() ? "  [PLAYING]" : "");
+                  sceneDirty_      ? "  [Modified]" : "",
+                  pie_.isPlaying() ? "  [PLAYING]"  : "");
     const float tw = ImGui::CalcTextSize(status).x;
     ImGui::SameLine(ImGui::GetWindowWidth() - tw - 20.0f);
     ImGui::TextUnformatted(status);
@@ -363,6 +664,31 @@ void EditorApp::drawPanels() {
     if (!activeScene_) return;
     core::ecs::World& world = activeScene_->world();
 
+    // P2 — When PIE is active, mirror the first player entity's Transform into
+    // the editor camera so the viewport shows the player's point of view.
+    // The editor camera WASD input is suppressed via setPieActive() below.
+    const bool pieActive = pie_.isUsingPlayerCamera();
+    if (pieActive) {
+        core::ecs::View<core::Transform, core::input::InputReceiverComponent> view(world);
+        auto it = view.begin();
+        if (it != view.end()) {
+            auto [e, tr, recv] = *it;
+            static_cast<void>(e);
+            static_cast<void>(recv);
+
+            // Decompose quaternion into yaw/pitch for EditorCamera.
+            // Uses the same YXZ Euler decomposition as the Transform widget.
+            const core::math::Mat4 rm    = core::math::toMat4(tr.rotation);
+            const float            sinP  = -rm.m[2][1];
+            const float            pitch = std::asin(std::clamp(sinP, -1.0f, 1.0f));
+            const float            cp    = std::cos(pitch);
+            const float            yaw   = cp > 0.0001f
+                                               ? std::atan2(rm.m[2][0], rm.m[2][2])
+                                               : std::atan2(-rm.m[0][2], rm.m[0][0]);
+            camera_.setFirstPersonView(tr.position, yaw, pitch);
+        }
+    }
+
     if (showHierarchy_) {
         selected_ = hierarchyPanel_.draw(world, selected_, undo_, &showHierarchy_);
     }
@@ -370,6 +696,7 @@ void EditorApp::drawPanels() {
         inspectorPanel_->draw(world, selected_, &showInspector_);
     }
     if (showViewport_) {
+        viewportPanel_.setPieActive(pieActive);
         // No offscreen scene RT is wired yet; pass 0 to show the placeholder.
         viewportPanel_.draw(world, selected_, camera_, picking_, undo_, 0, &showViewport_);
     }
@@ -379,9 +706,56 @@ void EditorApp::drawPanels() {
     if (showConsole_) {
         consolePanel_.draw(&showConsole_);
     }
+    if (showSceneProps_ && activeScene_) {
+        if (scenePropsPanel_.draw(activeScene_->globals(), &showSceneProps_)) {
+            sceneDirty_ = true;
+        }
+    }
+    if (showPhysMats_) {
+        const std::string physMatPath = contentRoot_.empty()
+            ? "config/physics_materials.toml"
+            : contentRoot_ + "/config/physics_materials.toml";
+        physMatPanel_.draw(physMatTable_, physMatPath, &showPhysMats_);
+    }
+    if (showCollisionLayers_) {
+        const std::string layersPath = contentRoot_.empty()
+            ? "config/collision_layers.toml"
+            : contentRoot_ + "/config/collision_layers.toml";
+        collisionLayerPanel_.draw(globalQueryFilter_, layersPath, &showCollisionLayers_);
+    }
 }
 
 void EditorApp::frame() {
+    // E2 — Update window title whenever the desired title changes.
+    {
+        std::wstring title;
+        if (currentScenePath_.empty()) {
+            title = L"EngineEditor — Untitled";
+        } else {
+            title = L"EngineEditor — " +
+                    std::filesystem::path(currentScenePath_).filename().wstring();
+        }
+        if (sceneDirty_) title += L'*';
+        if (title != lastWindowTitle_) {
+            lastWindowTitle_ = title;
+            HWND hwnd = static_cast<HWND>(gpu_->window->nativeHandle());
+            SetWindowTextW(hwnd, title.c_str());
+        }
+    }
+
+    // Poll background import job.
+    importer_.tick([this](const EditorImporter::Result& r) {
+        if (r.succeeded) {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "Import complete: %s",
+                          r.eassetPath.filename().string().c_str());
+            consolePanel_.log(ConsolePanel::Level::Info, buf);
+            assetPanel_.refresh();
+        } else {
+            consolePanel_.log(ConsolePanel::Level::Error, r.errorMessage.c_str());
+        }
+    });
+
     // PIE advances the simulation while playing.
     if (pie_.isPlaying()) {
         ImGuiIO& io = ImGui::GetIO();
@@ -395,6 +769,55 @@ void EditorApp::frame() {
     ImGui::NewFrame();
 
     buildDockLayout();
+
+    // Keyboard shortcuts (checked once per frame, not per-panel).
+    if (!ImGui::GetIO().WantTextInput) {
+        const bool ctrl  = ImGui::GetIO().KeyCtrl;
+        const bool shift = ImGui::GetIO().KeyShift;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_N, false)) newScene();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) openSceneDialog();
+        if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_S, false))
+            saveScene(currentScenePath_);
+        if (ctrl && shift  && ImGui::IsKeyPressed(ImGuiKey_S, false))
+            saveSceneDialog();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) undo_.undo();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) undo_.redo();
+    }
+
+    // E1 — Unsaved-changes modal.  Must be rendered every frame while open.
+    if (unsavedModalOpen_) {
+        // Center on the main viewport.
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("##UnsavedChanges", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoTitleBar)) {
+            ImGui::Text("You have unsaved changes.");
+            ImGui::Spacing();
+            if (ImGui::Button("Save")) {
+                ImGui::CloseCurrentPopup();
+                saveScene(currentScenePath_);
+                executePendingAction();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Discard")) {
+                ImGui::CloseCurrentPopup();
+                sceneDirty_ = false;
+                executePendingAction();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                ImGui::CloseCurrentPopup();
+                pendingAction_    = PendingAction::None;
+                pendingOpenPath_.clear();
+                unsavedModalOpen_ = false;
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    drawErrorDialog();
+
     drawPanels();
 
     ImGui::Render();
@@ -417,7 +840,28 @@ void EditorApp::frame() {
 void EditorApp::run() {
     if (!running_) return;
 
-    while (running_ && !gpu_->window->wantsClose()) {
+    while (running_) {
+        // E1 — When the OS close button is clicked (wantsClose() latches to true
+        // on WM_DESTROY), guard against discarding unsaved work.
+        // closePromptShown_ prevents the modal from re-opening every frame once
+        // the user has dismissed it via Cancel (wantsClose remains true permanently
+        // after the X is clicked on Win32).
+        if (gpu_->window->wantsClose() && !unsavedModalOpen_) {
+            if (!sceneDirty_) {
+                // Nothing to save — exit the loop immediately.
+                break;
+            }
+            if (!closePromptShown_) {
+                // First time seeing the close request while dirty: prompt.
+                closePromptShown_ = true;
+                pendingAction_    = PendingAction::CloseWindow;
+                confirmDiscardChanges();
+                // Fall through to frame() to render the modal this frame.
+            }
+            // If closePromptShown_ is already true the user cancelled the
+            // close; we ignore wantsClose() and let the editor keep running.
+            // The user can save and then close normally via File > Exit.
+        }
         frame();
     }
 
@@ -428,6 +872,9 @@ void EditorApp::shutdown() {
     if (!gpu_) return;
     if (gpu_->device) gpu_->device->flush();
     pie_.stop();
+    if (!prefsPath_.empty()) {
+        prefs_.saveToDisk(prefsPath_);
+    }
     tools::Config::shutdown();
     gpu_.reset();   // tears down ImGui + device + window in Gpu::~Gpu
     LOG_INFO("EngineEditor shutdown complete");
@@ -503,6 +950,76 @@ void EditorApp::registerComponentWidgets() {
         }
         return false;
     });
+
+    // ColliderComponent: shape, dimensions, layer, material, trigger flag.
+    componentRegistry_.registerWidget(core::ColliderComponent::kComponentId, [](void* data) -> bool {
+        auto* c = static_cast<core::ColliderComponent*>(data);
+        return drawColliderWidget(*c);
+    });
+
+    // AnimationState: clip/time display (read-only) + blend weight + force-clip PIE combo.
+    componentRegistry_.registerWidget(core::AnimationState::kComponentId, [](void* data) -> bool {
+        auto* s = static_cast<core::AnimationState*>(data);
+        return drawAnimationStateWidget(*s);
+    });
+
+    // MeshHandle: asset path (editable text field).
+    componentRegistry_.registerWidget(core::MeshHandle::kComponentId, [](void* data) -> bool {
+        auto* m = static_cast<core::MeshHandle*>(data);
+        return ImGui::InputText("Asset Path", m->assetPath, sizeof(m->assetPath));
+    });
+
+    // HierarchyComponent: read-only info showing parent entity.
+    componentRegistry_.registerWidget(core::ecs::HierarchyComponent::kComponentId,
+        [](void* data) -> bool {
+            const auto* hc = static_cast<core::ecs::HierarchyComponent*>(data);
+            if (hc->parent == core::ecs::kInvalidEntity) {
+                ImGui::TextDisabled("(root entity)");
+            } else {
+                ImGui::Text("Parent: %u:%u", hc->parent.index, hc->parent.generation);
+            }
+            return false;
+        });
+
+    // PrefabInstance: source path + override bitmask.
+    componentRegistry_.registerWidget(core::ecs::PrefabInstance::kComponentId,
+        [](void* data) -> bool {
+            auto* pi = static_cast<core::ecs::PrefabInstance*>(data);
+            return drawPrefabInstanceWidget(*pi);
+        });
+}
+
+namespace {
+template<typename T>
+void registerOne(const char* name) {
+    core::ecs::World::registerComponent<T>({
+        name, sizeof(T), alignof(T),
+        [](void* p) { new(p) T{}; }, nullptr, nullptr
+    });
+    tools::SceneSerializer::registerComponentLoader(T::kComponentId,
+        [](core::ecs::World& w, core::ecs::Entity e, const uint8_t* data, size_t sz) {
+            T comp{};
+            if (sz >= sizeof(T)) std::memcpy(&comp, data, sizeof(T));
+            w.addComponent<T>(e, comp);
+        });
+}
+} // anonymous namespace
+
+void EditorApp::registerComponents() {
+    registerOne<core::ecs::Name>                       ("Name");
+    registerOne<core::Transform>                       ("Transform");
+    registerOne<core::input::InputReceiverComponent>   ("InputReceiverComponent");
+    registerOne<core::Health>                          ("Health");
+    registerOne<core::Lifetime>                        ("Lifetime");
+    registerOne<core::TeamTag>                         ("TeamTag");
+    registerOne<physics::RigidBody>                    ("RigidBody");
+    registerOne<physics::CharacterController>          ("CharacterController");
+    // ID 8 = NetworkIdentity — not linked in editor; files with it skip gracefully.
+    registerOne<core::ColliderComponent>               ("ColliderComponent");
+    registerOne<core::AnimationState>                  ("AnimationState");
+    registerOne<core::ecs::HierarchyComponent>         ("HierarchyComponent");
+    registerOne<core::MeshHandle>                      ("MeshHandle");
+    registerOne<core::ecs::PrefabInstance>             ("PrefabInstance");
 }
 
 } // namespace engine::editor

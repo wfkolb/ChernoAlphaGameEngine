@@ -139,6 +139,36 @@ namespace engine::core::ecs {
         rec.row       = dstRow;
     }
 
+    void World::addComponentRaw(Entity e, ComponentTypeId id,
+                               const void* data, size_t size) {
+        ENGINE_ASSERT(isAlive(e), "addComponentRaw: entity not alive");
+        const ComponentMeta& meta = registry_[id];
+        ENGINE_ASSERT(meta.size != 0,   "addComponentRaw: component type not registered");
+        ENGINE_ASSERT(meta.size == size, "addComponentRaw: size mismatch");
+
+        EntityRecord& rec = entities_[e.index];
+        ENGINE_ASSERT(rec.generation == e.generation, "addComponentRaw: stale handle");
+
+        Archetype* src = rec.archetype;
+        ENGINE_ASSERT(!src->mask.test(id), "addComponentRaw: component already present");
+
+        ComponentMask newMask = src->mask;
+        newMask.set(id);
+
+        Archetype* dst = src->addEdge[id];
+        if (!dst) {
+            dst = getOrCreateArchetype(newMask);
+            src->addEdge[id]    = dst;
+            dst->removeEdge[id] = src;
+        }
+
+        moveEntity(e, dst);
+
+        const uint32_t newRow = entities_[e.index].row;
+        auto& col = dst->columns.at(id);
+        std::memcpy(col.data() + newRow * meta.size, data, size);
+    }
+
     void World::flushCommands(CommandBuffer& cb) {
         cb.flush(*this);
     }

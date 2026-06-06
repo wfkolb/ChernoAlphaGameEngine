@@ -31,6 +31,10 @@ public:
     // Re-center on a point and (optionally) pull the camera to a framing distance.
     void frame(const core::math::Vec3& target, float radius = 2.0f);
 
+    // Overwrite position and orientation directly. Used by PIE to mirror the
+    // player entity Transform into the viewport without disturbing orbit state.
+    void setFirstPersonView(const core::math::Vec3& position, float yawRad, float pitchRad) noexcept;
+
     core::math::Mat4 viewMatrix() const;
     core::math::Vec3 position() const { return position_; }
     core::math::Vec3 focus() const { return focus_; }

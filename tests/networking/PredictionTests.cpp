@@ -124,14 +124,19 @@ TEST(SnapshotBuffer, ExtrapolatesWithinLimit) {
 
 TEST(SnapshotBuffer, NoSampleBeyondExtrapolationLimit) {
     // Push at t=0 ms. Sample at currentMs=400 → target=300ms.
-    // 300 - 0 = 300 ms > kMaxExtrapMs (200 ms) → return false.
+    // 300 - 0 = 300 ms > kMaxExtrapMs (200 ms) → hold last position, return true.
     SnapshotBuffer buf;
     buf.push(1u, 0.0f, { makeState(1u, 10.0f) });
 
+    float visitedX = -1.0f;
     bool called = false;
-    bool ok = buf.sample(400.0f, [&](uint32_t, const Transform&){ called = true; });
-    EXPECT_FALSE(ok);
-    EXPECT_FALSE(called);
+    bool ok = buf.sample(400.0f, [&](uint32_t, const Transform& t){
+        visitedX = t.position.x;
+        called = true;
+    });
+    EXPECT_TRUE(ok);
+    EXPECT_TRUE(called);
+    EXPECT_FLOAT_EQ(visitedX, 10.0f);  // held at last known position
 }
 
 TEST(SnapshotBuffer, InterpolatesPosition) {

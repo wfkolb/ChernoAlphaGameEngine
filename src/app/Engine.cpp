@@ -6,6 +6,11 @@
 #include "networking/WinsockGuard.h"
 #include "core/Input.h"
 #include "core/log.h"
+#include <core/components/ColliderComponent.h>
+#include <core/components/AnimationState.h>
+#include <core/components/MeshHandle.h>
+#include <core/ecs/HierarchyComponent.h>
+#include <core/ecs/PrefabInstance.h>
 #include <core/ecs/Name.h>
 #include <core/components/Transform.h>
 #include <core/components/Health.h>
@@ -83,6 +88,41 @@ bool Engine::init(const EngineConfig& cfg) {
         sizeof(networking::NetworkIdentity),
         alignof(networking::NetworkIdentity),
         [](void* ptr) { new(ptr) networking::NetworkIdentity{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::ColliderComponent>({   // id 9
+        "ColliderComponent",
+        sizeof(core::ColliderComponent),
+        alignof(core::ColliderComponent),
+        [](void* ptr) { new(ptr) core::ColliderComponent{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::AnimationState>({      // id 10
+        "AnimationState",
+        sizeof(core::AnimationState),
+        alignof(core::AnimationState),
+        [](void* ptr) { new(ptr) core::AnimationState{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::ecs::HierarchyComponent>({ // id 11
+        "HierarchyComponent",
+        sizeof(core::ecs::HierarchyComponent),
+        alignof(core::ecs::HierarchyComponent),
+        [](void* ptr) { new(ptr) core::ecs::HierarchyComponent{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::MeshHandle>({          // id 12
+        "MeshHandle",
+        sizeof(core::MeshHandle),
+        alignof(core::MeshHandle),
+        [](void* ptr) { new(ptr) core::MeshHandle{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::ecs::PrefabInstance>({ // id 13
+        "PrefabInstance",
+        sizeof(core::ecs::PrefabInstance),
+        alignof(core::ecs::PrefabInstance),
+        [](void* ptr) { new(ptr) core::ecs::PrefabInstance{}; },
         nullptr, nullptr
     });
     world_    = std::make_unique<core::ecs::World>();
