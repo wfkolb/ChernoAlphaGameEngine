@@ -3,10 +3,12 @@
 #include <core/EventBus.h>
 #include <core/components/Transform.h>
 #include <core/log.h>
+#include <physics/LagCompensator.h>
 #include <physics/PhysicsWorld.h>
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace engine::app {
 
@@ -24,6 +26,7 @@ DamageSystem::DamageSystem(engine::core::ecs::World&              world,
     , registry_(registry)
     , eventBus_(eventBus)
     , replication_(replicationSystem)
+    , lagComp_(physics)
 {}
 
 void DamageSystem::setWeaponDamage(uint8_t weaponType, float damage) {
@@ -45,6 +48,41 @@ void DamageSystem::submitRequest(
     uint8_t weaponType) {
     queue_.push_back({req, weaponType});
 }
+
+engine::physics::RaycastHit DamageSystem::lagCompRaycast(
+    uint32_t                        tick,
+    const engine::core::math::Vec3& origin,
+    const engine::core::math::Vec3& dir,
+    float                           maxDist)
+{
+    engine::physics::RaycastHit invalid;
+    invalid.hasHit = false;
+
+    if (!replication_)
+        return invalid;
+
+    const networking::TransformHistoryEntry* entry =
+        replication_->getSnapshotAtTick(tick);
+    if (!entry) {
+        LOG_WARN("DamageSystem: tick {} not in rewind history; raycasting "
+                 "against live positions", tick);
+        return invalid;
+    }
+
+    // Convert the networking history map into a flat EntityTransformSnapshot
+    // span that LagCompensator can consume without touching the networking module.
+    std::vector<engine::physics::EntityTransformSnapshot> snapshots;
+    snapshots.reserve(entry->transforms.size());
+
+    for (const auto& [netId, hist] : entry->transforms) {
+        const core::ecs::Entity e = registry_.find(netId);
+        if (e == core::ecs::kInvalidEntity) continue;
+        snapshots.push_back({e, hist});
+    }
+
+    return lagComp_.rewindAndRaycast(snapshots, origin, dir, maxDist);
+}
+
 
 void DamageSystem::tick() {
     // Prune dedup entries older than 640 ticks (10 s at 64 Hz) before processing
@@ -95,15 +133,17 @@ void DamageSystem::tick() {
         const float lenAfter = std::sqrt(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
         if (lenAfter > 1e-4f) dir /= lenAfter;
 
-        // Rewind networked entity positions to req.clientTick so the raycast
-        // sees the world as the shooting client saw it. If history is unavailable
-        // (replication_ null, or tick too old) the raycast uses live positions.
-        std::vector<SavedTransform> rewindSaved;
-        const bool rewound = rewindToTick(req.clientTick, rewindSaved);
-
-        const auto hit = physics_.raycast(req.origin, dir, 1000.0f);
-
-        if (rewound) restoreTransforms(rewindSaved);
+        // Use LagCompensator to rewind entity positions to req.clientTick so
+        // the raycast sees the world as the shooting client saw it.
+        // If history is unavailable lagCompRaycast returns hasHit==false and
+        // we fall back to a live-position raycast.
+        engine::physics::RaycastHit hit = lagCompRaycast(req.clientTick,
+                                                         req.origin, dir,
+                                                         1000.0f);
+        if (!hit.hasHit) {
+            // Fallback: raycast against live positions.
+            hit = physics_.raycast(req.origin, dir, 1000.0f);
+        }
 
         if (!hit.hasHit)
             continue;
@@ -165,40 +205,6 @@ void DamageSystem::tick() {
             pendingDeathRpcs_.push_back(PlayerDiedPayload{
                 targetNetId, acc.attackerNetId, acc.weaponType, deathPos});
         }
-    }
-}
-
-bool DamageSystem::rewindToTick(uint32_t tick,
-                                std::vector<SavedTransform>& saved)
-{
-    if (!replication_) return false;
-    const networking::TransformHistoryEntry* entry =
-        replication_->getSnapshotAtTick(tick);
-    if (!entry) {
-        LOG_WARN("DamageSystem: tick {} not in rewind history; raycasting "
-                 "against live positions", tick);
-        return false;
-    }
-    saved.reserve(entry->transforms.size());
-    for (const auto& [netId, hist] : entry->transforms) {
-        const core::ecs::Entity e = registry_.find(netId);
-        if (e == core::ecs::kInvalidEntity) continue;
-        auto* current = world_.tryGet<core::Transform>(e);
-        if (!current) continue;
-        saved.push_back({e, *current});
-        *current = hist;
-        physics_.setTransformByEntity(e, hist);
-    }
-    return true;
-}
-
-void DamageSystem::restoreTransforms(const std::vector<SavedTransform>& saved)
-{
-    for (const auto& s : saved) {
-        auto* current = world_.tryGet<core::Transform>(s.entity);
-        if (!current) continue;
-        *current = s.transform;
-        physics_.setTransformByEntity(s.entity, s.transform);
     }
 }
 

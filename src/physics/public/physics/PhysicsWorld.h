@@ -53,6 +53,11 @@ public:
     void setTransformByEntity(engine::core::ecs::Entity entity,
                               const engine::core::Transform& t);
 
+    // Return the transform of the first body belonging to `entity`, or a
+    // default-constructed Transform if no matching body is found.
+    // Used by LagCompensator to save/restore positions around a rewind.
+    engine::core::Transform getTransformByEntity(engine::core::ecs::Entity entity) const;
+
     // Velocity / force (ignored for Static bodies)
     void setLinearVelocity(BodyId id, engine::core::math::Vec3 v);
     engine::core::math::Vec3 getLinearVelocity(BodyId id) const;
