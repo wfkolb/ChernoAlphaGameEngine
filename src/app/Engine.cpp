@@ -20,6 +20,7 @@
 #include <physics/RigidBody.h>
 #include <physics/CharacterController.h>
 #include <networking/NetworkIdentity.h>
+#include <rendering/Camera.h>
 
 namespace engine::app {
 
@@ -123,6 +124,14 @@ bool Engine::init(const EngineConfig& cfg) {
         sizeof(core::ecs::PrefabInstance),
         alignof(core::ecs::PrefabInstance),
         [](void* ptr) { new(ptr) core::ecs::PrefabInstance{}; },
+        nullptr, nullptr
+    });
+    // ids 14, 15 reserved for SpawnPointComponent (#68) and TriggerComponent (#72).
+    core::ecs::World::registerComponent<rendering::Camera>({          // id 16
+        "Camera",
+        sizeof(rendering::Camera),
+        alignof(rendering::Camera),
+        [](void* ptr) { new(ptr) rendering::Camera{}; },
         nullptr, nullptr
     });
     world_    = std::make_unique<core::ecs::World>();
