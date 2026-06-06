@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+#include <array>
 
 // ---------------------------------------------------------------------------
 // Internal binary layout types — must match AssetImporter.cpp exactly.
@@ -15,7 +16,7 @@ namespace {
 
 struct EassHeader {
     char     magic[4];        // "EASS"
-    uint16_t version;         // 1
+    uint16_t version;         // 1 or 2
     uint16_t assetType;       // 0 = Mesh
     uint32_t totalSize;
     uint32_t tocOffset;       // offset of first TocEntry from file start
@@ -24,7 +25,7 @@ struct EassHeader {
 static_assert(sizeof(EassHeader) == 20, "EassHeader must be exactly 20 bytes");
 
 struct TocEntry {
-    char     id[4];           // "MESH"
+    char     id[4];           // "MESH" or "COLL"
     uint32_t offset;          // offset of section from file start
     uint32_t size;            // section size in bytes
     uint32_t reserved;        // 0
@@ -40,6 +41,14 @@ struct MeshSectionHeader {
     float    aabbMax[3];
 };
 static_assert(sizeof(MeshSectionHeader) == 36, "MeshSectionHeader must be exactly 36 bytes");
+
+struct CollSectionHeader {
+    uint8_t  collisionType;   // 0 = TriangleMesh, 1 = ConvexHull
+    uint8_t  pad[3];
+    uint32_t vertexCount;
+    uint32_t indexCount;
+};
+static_assert(sizeof(CollSectionHeader) == 12, "CollSectionHeader must be exactly 12 bytes");
 
 #pragma pack(pop)
 
@@ -81,7 +90,8 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
     if (std::memcmp(hdr.magic, "EASS", 4) != 0) {
         return std::nullopt;
     }
-    if (hdr.version != 1) {
+    // Accept version 1 (no collision) and version 2 (optional COLL section).
+    if (hdr.version != 1 && hdr.version != 2) {
         return std::nullopt;
     }
     if (hdr.assetType != 0) {
@@ -91,10 +101,11 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
         return std::nullopt;
     }
 
-    // Step 4: Iterate TocEntries to find the "MESH" entry.
-    // Validate bounds before each read.
+    // Step 4: Iterate TocEntries to find "MESH" and optionally "COLL".
     TocEntry meshTocEntry{};
-    bool foundMesh = false;
+    bool     foundMesh = false;
+    TocEntry collTocEntry{};
+    bool     foundColl = false;
 
     for (uint32_t i = 0; i < hdr.tocEntryCount; ++i) {
         const std::size_t entryOffset =
@@ -110,8 +121,10 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
 
         if (std::memcmp(entry.id, "MESH", 4) == 0) {
             meshTocEntry = entry;
-            foundMesh = true;
-            break;
+            foundMesh    = true;
+        } else if (std::memcmp(entry.id, "COLL", 4) == 0) {
+            collTocEntry = entry;
+            foundColl    = true;
         }
     }
 
@@ -119,7 +132,7 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
         return std::nullopt;
     }
 
-    // Step 5: Validate TocEntry section bounds.
+    // Step 5: Validate MESH TocEntry section bounds.
     const std::size_t sectionOffset = static_cast<std::size_t>(meshTocEntry.offset);
     const std::size_t sectionSize   = static_cast<std::size_t>(meshTocEntry.size);
 
@@ -150,7 +163,7 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
         return std::nullopt;
     }
 
-    // Step 9: All validation passed — resize vectors and copy data.
+    // Step 9: All mesh validation passed — copy vertex and index data.
     CpuMesh result;
     result.vertices.resize(msh.vertexCount);
     result.indices.resize(msh.indexCount);
@@ -167,7 +180,52 @@ std::optional<CpuMesh> loadEasset(const std::filesystem::path& path)
                 ptrAfterVertices,
                 msh.indexCount * sizeof(uint32_t));
 
-    // Step 10: Return the populated CpuMesh.
+    // Step 10: Parse optional COLL section (version 2 only).
+    if (foundColl && hdr.version == 2) {
+        const std::size_t collOffset = static_cast<std::size_t>(collTocEntry.offset);
+        const std::size_t collSize   = static_cast<std::size_t>(collTocEntry.size);
+
+        // Bounds check: header must fit.
+        if (collOffset + sizeof(CollSectionHeader) <= fileBytes.size()
+            && collOffset + collSize              <= fileBytes.size()) {
+
+            CollSectionHeader csh{};
+            std::memcpy(&csh, fileBytes.data() + collOffset, sizeof(CollSectionHeader));
+
+            // Validate declared data fits within collSize.
+            const std::size_t expectedCollSize =
+                sizeof(CollSectionHeader)
+                + static_cast<std::size_t>(csh.vertexCount) * 3u * sizeof(float)
+                + static_cast<std::size_t>(csh.indexCount)  * sizeof(uint32_t);
+
+            if (expectedCollSize <= collSize) {
+                CpuCollision coll;
+                coll.type = static_cast<CollisionType>(csh.collisionType);
+
+                // Read position-only vertices.
+                const uint8_t* pv = fileBytes.data() + collOffset + sizeof(CollSectionHeader);
+                coll.vertices.resize(csh.vertexCount);
+                for (uint32_t vi = 0; vi < csh.vertexCount; ++vi) {
+                    std::array<float, 3> pos{};
+                    std::memcpy(pos.data(), pv + vi * 3u * sizeof(float), 3u * sizeof(float));
+                    coll.vertices[vi] = pos;
+                }
+
+                // Read index buffer (empty for ConvexHull).
+                if (csh.indexCount > 0) {
+                    const uint8_t* pi = pv + static_cast<std::size_t>(csh.vertexCount)
+                                           * 3u * sizeof(float);
+                    coll.indices.resize(csh.indexCount);
+                    std::memcpy(coll.indices.data(), pi,
+                                csh.indexCount * sizeof(uint32_t));
+                }
+
+                result.collision = std::move(coll);
+            }
+        }
+    }
+
+    // Step 11: Return the populated CpuMesh.
     return result;
 }
 

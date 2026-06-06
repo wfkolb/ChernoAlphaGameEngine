@@ -32,8 +32,9 @@ public:
 
 private:
     struct PendingMeshLoad {
-        uint32_t    entityIndex;
-        std::string assetPath;
+        uint32_t         entityIndex;
+        uint32_t         entityGeneration;
+        std::string      assetPath;
     };
 
     std::unique_ptr<Engine>                    engine_;

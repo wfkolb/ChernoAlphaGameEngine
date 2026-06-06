@@ -3,6 +3,7 @@
 #include "editor/panels/AssetBrowserPanel.h"
 
 #include <imgui.h>
+#include <tools/AssetImporter.h>
 
 #include <algorithm>
 #include <cctype>
@@ -92,6 +93,16 @@ void AssetBrowserPanel::drawImportModal() {
         }
 
         ImGui::Checkbox("Generate Collision", &importSettings_.generateCollision);
+        if (importSettings_.generateCollision) {
+            ImGui::Indent();
+            const char* collTypes[] = { "Triangle Mesh (static)", "Convex Hull (dynamic)" };
+            int collTypeIdx = static_cast<int>(importSettings_.collisionType);
+            if (ImGui::Combo("Shape Type", &collTypeIdx, collTypes, 2)) {
+                importSettings_.collisionType =
+                    static_cast<tools::CollisionType>(collTypeIdx);
+            }
+            ImGui::Unindent();
+        }
         ImGui::Checkbox("Merge Meshes",       &importSettings_.mergeMeshes);
 
         // LOD count is fixed at 1 for Phase 8 — show as read-only.
