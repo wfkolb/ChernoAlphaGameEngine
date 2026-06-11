@@ -8,14 +8,18 @@
 #include <physics/PhysicsWorld.h>
 #include <rendering/MeshManager.h>
 #include <rendering/Camera.h>
+#include <rendering/DebugDraw.h>
 #include <tools/EassetLoader.h>
 #include <core/components/ColliderComponent.h>
+#include <core/components/MeshHandle.h>
 #include <core/log.h>
 #include <core/ecs/View.h>
 #include <core/components/Transform.h>
 #include <core/math/Mat.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstring>
 #include <span>
 
 namespace engine::app {
@@ -40,8 +44,27 @@ bool Application::init(const ApplicationDesc& desc) {
 
     // BW3: create and init mesh render system. MeshManager itself must be
     // constructed inside a beginFrame/endFrame pair; it is lazy-initialized in run().
-    meshRenderSystem_ = std::make_unique<MeshRenderSystem>();
-    meshRenderSystem_->init(engine_->device());
+    meshRenderSystem_  = std::make_unique<MeshRenderSystem>();
+    materialManager_   = std::make_unique<rendering::MaterialManager>(engine_->device());
+
+    // Register the default material at index 0 before init() so it is always present.
+    {
+        rendering::GpuMaterial mat = {};
+        mat.albedoTextureIndex     = 0xFFFFFFFFu;
+        mat.normalTextureIndex     = 0xFFFFFFFFu;
+        mat.metallicRoughnessIndex = 0xFFFFFFFFu;
+        mat.emissiveTextureIndex   = 0xFFFFFFFFu;
+        mat.albedoFactor[0] = 0.8f; mat.albedoFactor[1] = 0.8f;
+        mat.albedoFactor[2] = 0.8f; mat.albedoFactor[3] = 1.0f;
+        mat.metallicFactor  = 0.0f;
+        mat.roughnessFactor = 0.5f;
+        materialManager_->add(mat, "default");
+    }
+
+    meshRenderSystem_->init(engine_->device(), *materialManager_);
+
+    rendering::DebugDraw::init();
+    rendering::DebugDraw::initGpu(engine_->device().nativeDevice());
 
     context_.world           = &engine_->world();
     context_.systemScheduler = &scheduler_;
@@ -51,6 +74,8 @@ bool Application::init(const ApplicationDesc& desc) {
     GameLoop::Desc loopDesc{};
     loopDesc.scheduler    = &scheduler_;
     loopDesc.physicsWorld = physicsWorld_.get();
+    loopDesc.eventBus     = &engine_->eventBus();
+    loopDesc.gameMode     = desc.gameMode;
     gameLoop_.init(loopDesc);
 
     game_ = desc.game;
@@ -87,12 +112,21 @@ void Application::run() {
     float           accumulator   = 0.0f;
     auto            prevTime      = Clock::now();
 
-    engine_->run([&](core::ecs::World& world, rendering::FrameGraph& fg) {
+    engine_->run([&](core::ecs::World& engineWorld, rendering::FrameGraph& fg) {
         // BW3: MeshManager must be constructed while a frame is open (after beginFrame).
         // Engine::run() calls beginFrame() before this callback.
         if (!meshManager_) {
             meshManager_ = std::make_unique<rendering::MeshManager>(engine_->device());
         }
+
+        // Resolve the world to use this frame: active scene's world if available,
+        // otherwise the engine world. context_.world must stay current so that
+        // systems ticked via game_->onGameTick see the right entities.
+        {
+            core::scene::Scene* sceneForWorld = sceneManager_.getActive();
+            context_.world = sceneForWorld ? &sceneForWorld->world() : &engineWorld;
+        }
+        core::ecs::World& world = *context_.world;
 
         // BW2: upload any meshes queued by the mesh-load delegate during scene activation.
         if (!pendingMeshLoads_.empty()) {
@@ -121,6 +155,33 @@ void Application::run() {
                             }
                             sceneWorld.addComponent<core::ColliderComponent>(e, cc);
                         }
+                    }
+
+                    // TX-4: Upload embedded textures and create a material entry.
+                    if (!cpuMesh->textures.empty() && activeScene) {
+                        rendering::GpuMaterial mat = {};
+                        mat.albedoTextureIndex     = 0xFFFFFFFFu;
+                        mat.normalTextureIndex     = 0xFFFFFFFFu;
+                        mat.metallicRoughnessIndex = 0xFFFFFFFFu;
+                        mat.emissiveTextureIndex   = 0xFFFFFFFFu;
+                        mat.albedoFactor[0] = mat.albedoFactor[1] = mat.albedoFactor[2] = 1.0f;
+                        mat.albedoFactor[3] = 1.0f;
+                        mat.roughnessFactor = 0.5f;
+
+                        const auto& texs = cpuMesh->textures;
+                        if (texs.size() > 0)
+                            mat.albedoTextureIndex     = meshRenderSystem_->uploadTexture(engine_->device(), texs[0]);
+                        if (texs.size() > 1)
+                            mat.normalTextureIndex     = meshRenderSystem_->uploadTexture(engine_->device(), texs[1]);
+                        if (texs.size() > 2)
+                            mat.metallicRoughnessIndex = meshRenderSystem_->uploadTexture(engine_->device(), texs[2]);
+                        if (texs.size() > 3)
+                            mat.emissiveTextureIndex   = meshRenderSystem_->uploadTexture(engine_->device(), texs[3]);
+
+                        const rendering::MaterialHandle mh = materialManager_->add(mat);
+                        core::ecs::Entity e{ load.entityIndex, load.entityGeneration };
+                        if (auto* mhComp = activeScene->world().tryGet<core::MeshHandle>(e))
+                            mhComp->materialIndex = mh.index;
                     }
                 } else {
                     LOG_WARN("Application: failed to load mesh asset '{}'", load.assetPath);
@@ -194,9 +255,32 @@ void Application::run() {
                     dev.nativeDepthBuffer(),
                     dev.depthBufferDsvHandle());
 
+                const float camPos[3] = {
+                    camTransform->position.x,
+                    camTransform->position.y,
+                    camTransform->position.z };
                 meshRenderSystem_->tick(world, *meshManager_, fg,
+                                        &viewMat.m[0][0],
+                                        &projMat.m[0][0],
                                         &viewProj.m[0][0],
-                                        bb, db, w, h);
+                                        bb, db, w, h, 0, camPos,
+                                        ViewMode::Lit);
+
+                // Debug draw pass — renders wireframe overlays on top of opaque geometry.
+                {
+                    std::array<float, 16> vpArr;
+                    std::memcpy(vpArr.data(), &viewProj.m[0][0], sizeof(vpArr));
+                    fg.addPass(
+                        "DebugLines",
+                        [bb](rendering::FrameGraph::PassBuilder& b) {
+                            b.write(bb, static_cast<uint32_t>(4u)); // RENDER_TARGET
+                        },
+                        [vpArr, bb, w, h](void* cl, const rendering::PassResources& res) {
+                            rendering::DebugDraw::flush(
+                                cl, vpArr.data(), res.getRtvHandle(bb), w, h);
+                        }
+                    );
+                }
             } else {
                 // Warn once per scene if there are mesh entities but no active camera.
                 if (!noCameraWarned_ && !meshRenderSystem_->empty()) {
@@ -228,6 +312,7 @@ void Application::wireScene(core::scene::Scene& scene) {
 void Application::shutdown() {
     if (!initialized_) return;
     if (game_) game_->onShutdown(context_);
+    rendering::DebugDraw::shutdown();
     engine_->shutdown();
     initialized_ = false;
 }

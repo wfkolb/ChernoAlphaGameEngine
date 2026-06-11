@@ -1,0 +1,13 @@
+{
+  "context": {
+    "date": "2026-06-07",
+    "host_name": "desktop-mid",
+    "note": "First-run placeholder — update with real numbers from hardware run"
+  },
+  "benchmarks": [
+    {"name": "BM_EmptyFrameClearPresent",   "real_time_ms": 0.5,  "cpu_time_ms": 0.05},
+    {"name": "BM_10kStaticMeshRecording",   "real_time_ms": 4.0,  "cpu_time_ms": 4.0},
+    {"name": "BM_FrameGraphCompile",        "real_time_ms": 0.05, "cpu_time_ms": 0.05},
+    {"name": "BM_LightCullSystem_64Lights", "real_time_ms": 0.2,  "cpu_time_ms": 0.2}
+  ]
+}

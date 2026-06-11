@@ -27,7 +27,7 @@ Both roles are supported in the same executable. Server and client can co-exist 
 2. Bind UDP socket to [network].port (default 7777)
 3. Enter accept loop (non-blocking, polled in FixedUpdate)
 4. For each connected client: create Session slot, exchange handshake
-5. Run simulation tick at 30 Hz (FixedUpdate phase)
+5. Run simulation tick at 64 Hz (FixedUpdate phase)
 6. After simulation: capture ECS snapshot, delta-encode per client, send
 7. Receive client input messages; apply to simulation
 8. On timeout or disconnect: clean up Session slot
@@ -100,11 +100,11 @@ After `ConnectionAcknowledge`, the connection is live. The XOR obfuscation key (
 
 | Entity | Rate | Phase |
 |---|---|---|
-| Server simulation tick | 30 Hz | `FixedUpdate` |
-| Client input send | 60 Hz | `Update` (every frame) |
-| Client snapshot apply | 30 Hz | `FixedUpdate` (when new snapshot arrives) |
+| Server simulation tick | 64 Hz | `FixedUpdate` |
+| Client input send | at render rate | `Update` (every frame) |
+| Client snapshot apply | 64 Hz | `FixedUpdate` (when new snapshot arrives) |
 
-The server's `FixedUpdate` runs at exactly 30 Hz, driven by `core::time::FixedTimestep` (not wall-clock drift). The fixed timestep accumulator handles frames that take longer than 33 ms by running multiple ticks.
+The server's `FixedUpdate` runs at exactly 64 Hz, driven by `core::time::FixedTimestep` (not wall-clock drift). The fixed timestep accumulator handles frames that take longer than ~15.6 ms by running multiple ticks.
 
 ### 3.2 System registration order (networking systems)
 

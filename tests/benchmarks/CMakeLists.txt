@@ -51,3 +51,24 @@ target_include_directories(tools_bench PRIVATE
 engine_add_warnings(tools_bench)
 add_test(NAME tools_bench COMMAND tools_bench)
 set_tests_properties(tools_bench PROPERTIES LABELS "benchmark")
+
+# ---------------------------------------------------------------------------
+# rendering_gbench  — CPU+GPU rendering benchmarks (label: "benchmark")
+# ---------------------------------------------------------------------------
+add_executable(rendering_gbench
+    "${CMAKE_CURRENT_SOURCE_DIR}/rendering_bench.cpp"
+)
+target_link_libraries(rendering_gbench PRIVATE
+    engine::rendering
+    engine::core
+    benchmark::benchmark_main
+    d3d12 dxgi dxguid
+)
+target_include_directories(rendering_gbench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/rendering/public
+    ${CMAKE_SOURCE_DIR}/src/rendering          # for internal/LightCullSystem.h
+    ${CMAKE_SOURCE_DIR}/src/core/public
+)
+engine_add_warnings(rendering_gbench)
+add_test(NAME rendering_gbench COMMAND rendering_gbench)
+set_tests_properties(rendering_gbench PROPERTIES LABELS "benchmark")

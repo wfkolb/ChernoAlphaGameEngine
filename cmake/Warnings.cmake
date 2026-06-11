@@ -12,3 +12,14 @@ set(ENGINE_COMPILE_FLAGS
 function(engine_add_warnings target)
     target_compile_options(${target} PRIVATE ${ENGINE_COMPILE_FLAGS})
 endfunction()
+
+# ASAN for Debug builds — catches memory errors in unit test runs.
+# Call engine_add_asan(target) after engine_add_warnings(target) for any
+# target that runs under ctest. MSVC ASAN is supported on windows-2022
+# runners; no extra runtime linkage is needed when using /fsanitize=address
+# with the MSVC toolset bundled in VS 2022 17.x.
+function(engine_add_asan target)
+    if(MSVC AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "DEBUG"))
+        target_compile_options(${target} PRIVATE /fsanitize=address)
+    endif()
+endfunction()

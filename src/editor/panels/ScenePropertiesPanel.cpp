@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <string_view>
 
 namespace engine::editor {
 
@@ -89,6 +90,39 @@ bool ScenePropertiesPanel::draw(core::scene::SceneGlobals& g, bool* open) {
     }
 
     if (ImGui::DragFloat("Fog Density", &g.fogDensity, 0.001f, 0.f, 1.f))
+        changed = true;
+
+    // ── Skybox ──────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Skybox");
+
+    {
+        char skyBuf[512] = {};
+        const size_t skyLen = std::min(g.skyboxAssetPath.size(), sizeof(skyBuf) - 1);
+        g.skyboxAssetPath.copy(skyBuf, skyLen);
+        if (ImGui::InputText("Skybox Asset", skyBuf, sizeof(skyBuf))) {
+            g.skyboxAssetPath = skyBuf;
+            changed = true;
+        }
+        // Drag-drop target: accept .easset drops onto the input field
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PATH")) {
+                const char* dropped = static_cast<const char*>(payload->Data);
+                std::string_view sv(dropped, payload->DataSize);
+                // Accept only .easset files
+                if (sv.ends_with(".easset")) {
+                    g.skyboxAssetPath = std::string(sv);
+                    changed = true;
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
+
+    // ── Shadows ─────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Shadows");
+
+    if (ImGui::DragFloat("Shadow Split \xce\xbb", &g.shadowSplitLambda, 0.01f, 0.0f, 1.0f,
+                         "%.2f", ImGuiSliderFlags_AlwaysClamp))
         changed = true;
 
     ImGui::End();

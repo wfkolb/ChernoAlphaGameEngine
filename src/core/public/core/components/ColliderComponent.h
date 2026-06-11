@@ -33,7 +33,7 @@ struct ColliderComponent {
     };
 
     Shape   shape         = Shape::Box;
-    uint8_t _pad0         = 0;
+    bool    enabled       = true;
     uint8_t _pad1         = 0;
     uint8_t _pad2         = 0;
     Params  params        = { .box = {} };

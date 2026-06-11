@@ -1,6 +1,6 @@
 # Rendering: PBR Lighting, Shadows, Camera, and Debug Draw
 
-Status: Approved (Phase 2)
+Status: Updated (Phase 10)
 Owner: Rendering Lead
 Task: #9
 References: architecture.md §2, rendering-mesh-material-shader.md, scope-rendering.md
@@ -184,18 +184,23 @@ This function lives in `core::math` (the rendering module calls it; the ECS desi
 
 ### 4.4 FPS camera controller component
 
+Implemented in Phase 10 (R6). Registered as ECS component ID 17 (`rendering::FpsCameraController`).
+
 ```cpp
 struct FpsCameraController {
-    float moveSpeed     { 5.0f };   // m/s
-    float lookSensitivity { 0.1f }; // degrees per raw mouse unit
-    float yaw   { 0.0f };           // degrees
-    float pitch { 0.0f };           // degrees, clamped ±89°
+    float moveSpeed       { 5.0f };   // m/s
+    float lookSensitivity { 0.1f };   // degrees per raw mouse unit
+    float yaw             { 0.0f };   // degrees
+    float pitch           { 0.0f };   // degrees, clamped ±89°
+    bool  active          { true };
 };
 ```
 
-System registered in `Update` phase. Reads `core::events::RawInputState` from the event bus. Writes `Transform::position` and `Transform::rotation` on the camera entity. Mouse look uses raw input delta, not cursor position.
+`FpsCameraSystem` is registered in the `Update` phase. It reads `InputSystem::currentFrame()` (which now includes gamepad state — see N1), integrates look and move deltas, and writes `Transform::position` and `Transform::rotation` on the same entity. Mouse look uses raw input delta, not cursor position.
 
-Movement: WASD + Q/E (up/down). Sprint: Shift. No physics, just direct position integration.
+Movement: WASD + Q/E (up/down). Sprint: Shift. Left gamepad stick controls look (yaw/pitch), right stick controls lateral/forward move. No physics — direct position integration.
+
+The `Camera` component (ID 16) was also formally registered in Phase 10 (R6); it was previously used without registration in Engine.cpp.
 
 ---
 
@@ -219,16 +224,18 @@ namespace engine::rendering::DebugDraw {
 
 ### 5.2 Implementation
 
-`DebugDraw` accumulates geometry into a per-frame CPU buffer (from the frame arena) and flushes it in a dedicated frame-graph pass at the end of `PostRender`. The pass uploads a vertex buffer of line segments (each non-line primitive is tessellated into lines) and draws with a simple unlit line-list shader (`DebugLineVS.hlsl` / `DebugLinePS.hlsl`).
+`DebugDraw.cpp` accumulates `DebugVertex` structs in a per-frame CPU buffer. `shaders/debug/DebugLineVS.hlsl` and `shaders/debug/DebugLinePS.hlsl` were created in Phase 10 (R5) and compile successfully.
 
-Line vertex:
+Line vertex (GPU layout):
 ```cpp
 struct DebugVertex { float xyz[3]; uint32_t packedColor; };  // 16 bytes
 ```
 
 Color packed as `RGBA8_UNORM`. The pass uses `D3D12_PRIMITIVE_TOPOLOGY_LINELIST`.
 
-Max debug primitives per frame: `kMaxDebugPrimitives = 65536` (hard cap; excess is silently dropped with a log warning at `LOG_WARN` level, once per frame maximum).
+**Current status (Phase 10 R5):** CPU accumulation is wired — `line()`, `sphere()`, `box()`, `aabb()` all append `DebugVertex` pairs. `flush()` is a stub: it logs the vertex count when no command list is set. Full GPU upload and FrameGraph pass registration is a `TODO Phase 10 R5` pending FrameGraph integration. `text()` is also a stub (logs, no billboard geometry).
+
+Max debug primitives per frame: `kMaxDebugPrimitives = 65536` (hard cap; excess is silently dropped with a `LOG_WARN`, once per frame maximum).
 
 ### 5.3 Text rendering
 

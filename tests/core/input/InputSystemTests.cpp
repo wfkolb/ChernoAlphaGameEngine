@@ -59,7 +59,7 @@ TEST(InputSystem, UnknownActionReturnsFalse) {
 TEST(InputSystem, QueryDefaultStateAfterBind) {
     // No keys are physically pressed in a headless test — states are false/zero.
     InputSystem sys;
-    sys.bindAction({"Jump", InputActionType::Digital, engine::core::Key::Space});
+    sys.bindAction({.actionName="Jump", .actionType=InputActionType::Digital, .key=engine::core::Key::Space});
     sys.update();
     EXPECT_FALSE(sys.queryHeld("Jump"));
     EXPECT_FALSE(sys.queryJustPressed("Jump"));
@@ -67,14 +67,14 @@ TEST(InputSystem, QueryDefaultStateAfterBind) {
 
 TEST(InputSystem, Analog1DDefaultIsZero) {
     InputSystem sys;
-    sys.bindAction({"MoveForward", InputActionType::Analog1D, engine::core::Key::W, 1.0f});
+    sys.bindAction({.actionName="MoveForward", .actionType=InputActionType::Analog1D, .key=engine::core::Key::W, .scale=1.0f});
     sys.update();
     EXPECT_NEAR(sys.queryAnalog1D("MoveForward"), 0.0f, 1e-6f);
 }
 
 TEST(InputSystem, ClearBindingsRemovesAction) {
     InputSystem sys;
-    sys.bindAction({"Fire", InputActionType::Digital, engine::core::Key::MouseLeft});
+    sys.bindAction({.actionName="Fire", .actionType=InputActionType::Digital, .key=engine::core::Key::MouseLeft});
     sys.clearBindingsForAction("Fire");
     sys.update();
     // After clear the action has no state entry
@@ -89,15 +89,15 @@ TEST(InputSystem, ClearUnknownActionIsNoop) {
 
 TEST(InputSystem, MultipleBindingsSameAction) {
     InputSystem sys;
-    sys.bindAction({"Move", InputActionType::Digital, engine::core::Key::W});
-    sys.bindAction({"Move", InputActionType::Digital, engine::core::Key::Up});
+    sys.bindAction({.actionName="Move", .actionType=InputActionType::Digital, .key=engine::core::Key::W});
+    sys.bindAction({.actionName="Move", .actionType=InputActionType::Digital, .key=engine::core::Key::Up});
     sys.update();
     EXPECT_FALSE(sys.queryHeld("Move"));
 }
 
 TEST(InputSystem, QueryReturnsCorrectType) {
     InputSystem sys;
-    sys.bindAction({"Sprint", InputActionType::Digital, engine::core::Key::LShift});
+    sys.bindAction({.actionName="Sprint", .actionType=InputActionType::Digital, .key=engine::core::Key::LShift});
     sys.update();
     ActionState s = sys.query("Sprint");
     EXPECT_EQ(s.type, InputActionType::Digital);
@@ -105,7 +105,7 @@ TEST(InputSystem, QueryReturnsCorrectType) {
 
 TEST(InputSystem, QueryAnalog1DTypeIsSet) {
     InputSystem sys;
-    sys.bindAction({"Throttle", InputActionType::Analog1D, engine::core::Key::Up, 1.0f});
+    sys.bindAction({.actionName="Throttle", .actionType=InputActionType::Analog1D, .key=engine::core::Key::Up, .scale=1.0f});
     sys.update();
     ActionState s = sys.query("Throttle");
     EXPECT_EQ(s.type, InputActionType::Analog1D);
@@ -121,7 +121,7 @@ TEST(InputSystem, LoadFromMissingTomlIsGraceful) {
 
 TEST(InputSystem, UpdateIdempotent) {
     InputSystem sys;
-    sys.bindAction({"Crouch", InputActionType::Digital, engine::core::Key::LCtrl});
+    sys.bindAction({.actionName="Crouch", .actionType=InputActionType::Digital, .key=engine::core::Key::LCtrl});
     sys.update();
     sys.update();  // second update in same frame must not crash
     EXPECT_FALSE(sys.queryHeld("Crouch"));

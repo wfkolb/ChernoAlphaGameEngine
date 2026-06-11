@@ -34,9 +34,8 @@ TEST(RenderingSmoke, deviceInitClearAndReadback) {
         cmdList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     }
 
-    device.endFrame();
-    device.flush();
-
+    // readbackBackBuffer records the copy commands on the open command list,
+    // then calls endFrame() + flush() internally.  Do NOT call endFrame() here.
     auto pixels = readbackBackBuffer(device, 0, 0, 64, 64);
     if (pixels.empty()) {
         GTEST_SKIP() << "Readback helper not yet implemented";

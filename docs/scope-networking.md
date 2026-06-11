@@ -18,10 +18,10 @@ In particular:
 2. **Transport layer over UDP.** Packet framing, sequence numbers, ack bitfield, optional reliable delivery for marked messages, MTU-aware fragmentation (≤ 1200 bytes per fragment, 1.4 KB MTU floor).
 3. **Packet serializer / deserializer.** Bit-level writer/reader with varints, quaternion compression, range-quantized floats. Endianness: little-endian on the wire (we're Windows-only).
 4. **Connection manager.** Handshake, keep-alive, timeout (5 s default), graceful disconnect, soft-reconnect within a 30 s window.
-5. **Session loop.** Server-tick at 30 Hz, client send-rate at 30 Hz, with input messages allowed at 60 Hz.
+5. **Session loop.** Server-tick at 64 Hz, client send-rate at render rate, with input messages sent every frame for lower latency.
 6. **Entity snapshot sync.** Server-authoritative replication of ECS components flagged `NetReplicated`. Delta encoding against per-client baselines.
 7. **Lag compensation** for hit registration. Server rewinds entity positions to the client's render time when validating a hitscan event.
-8. **Phase 4 integration:** multiplayer stress test (16 clients, 30 Hz, 5 minutes, 0 unexpected disconnects) and reconnect handling (task #41).
+8. **Phase 4 integration:** multiplayer stress test (16 clients, 64 Hz, 5 minutes, 0 unexpected disconnects) and reconnect handling (task #41).
 
 ## What you do NOT own
 
@@ -77,7 +77,7 @@ Definitions of done:
 - No `<winsock2.h>`, no `SOCKET`, no `sockaddr_in` in public headers. Wrap them. `Endpoint`, `Socket`, `Address` are your public types.
 - All public types are RAII; sockets close on destruction; `WSACleanup` is reference-counted via a `WinsockGuard` owned by the engine bootstrap.
 - The `NetReplicated` component is registered by your module's bootstrap, but its definition lives in `networking/Replication.h` and is included by other modules that want to mark entities replicated.
-- Constants use `kPascalCase`: `kDefaultTickRate = 30`, `kMaxFragmentSize = 1200`.
+- Constants use `kPascalCase`: `kDefaultTickRate = 64`, `kMaxFragmentSize = 1200`.
 
 ## Wire-format conventions
 
@@ -103,7 +103,7 @@ Definitions of done:
 |---|---|
 | Snapshot encode for 1k replicated entities | ≤ 1.0 ms server-side |
 | Snapshot decode | ≤ 0.5 ms client-side |
-| Bandwidth per client at 30 Hz, 1k entities | ≤ 200 KB/s |
+| Bandwidth per client at 64 Hz, 1k entities | ≤ 200 KB/s |
 | Loopback round-trip | ≤ 1 ms |
 
 These are aspirational baselines for the test lead's benchmarks (task #38).

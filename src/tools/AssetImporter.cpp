@@ -17,6 +17,9 @@
 // meshoptimizer — geometry optimisation passes (vcpkg package)
 #include <meshoptimizer.h>
 
+// stb_image — image decode (implementation is in StbImageImpl.cpp)
+#include <stb_image.h>
+
 // ---------------------------------------------------------------------------
 // Internal binary layout types (not exposed in the public header)
 // ---------------------------------------------------------------------------
@@ -74,6 +77,23 @@ struct VertexStatic {
     float    uv[2];           //  8 bytes
 };
 static_assert(sizeof(VertexStatic) == 28);
+
+// TEX section header (version 3).
+// Followed by mipCount × (TexMipHeader + pixel data).
+struct TexSectionHeader {
+    uint32_t dxgiFormat;  // 28 = DXGI_FORMAT_R8G8B8A8_UNORM
+    uint32_t baseWidth;
+    uint32_t baseHeight;
+    uint32_t mipCount;
+};
+static_assert(sizeof(TexSectionHeader) == 16);
+
+struct TexMipHeader {
+    uint32_t width;
+    uint32_t height;
+    uint32_t dataSize;
+};
+static_assert(sizeof(TexMipHeader) == 12);
 
 #pragma pack(pop)
 
@@ -184,6 +204,137 @@ RawMesh buildUnitCubeRaw() {
 }
 
 // ---------------------------------------------------------------------------
+// Texture data (CPU-side, before serialisation)
+// ---------------------------------------------------------------------------
+
+struct RawMipLevel {
+    std::vector<uint8_t> pixels;
+    uint32_t             width  = 0;
+    uint32_t             height = 0;
+};
+
+struct RawTexture {
+    std::vector<RawMipLevel> mips;
+    uint32_t                 dxgiFormat = 28; // DXGI_FORMAT_R8G8B8A8_UNORM (always RGBA8 for now)
+    uint32_t                 baseWidth  = 0;
+    uint32_t                 baseHeight = 0;
+};
+
+// Generate mip chain via a simple 2×2 box filter.
+// Source image must be RGBA8 (4 bytes per pixel), row-major, top-to-bottom.
+static RawMipLevel downsampleMip(const RawMipLevel& src)
+{
+    RawMipLevel dst;
+    dst.width  = std::max(1u, src.width  / 2u);
+    dst.height = std::max(1u, src.height / 2u);
+    dst.pixels.resize(static_cast<std::size_t>(dst.width) * dst.height * 4u);
+
+    for (uint32_t dy = 0; dy < dst.height; ++dy) {
+        for (uint32_t dx = 0; dx < dst.width; ++dx) {
+            // Source pixel coordinates — clamp to src bounds for non-power-of-two.
+            const uint32_t sx0 = dx * 2u;
+            const uint32_t sy0 = dy * 2u;
+            const uint32_t sx1 = std::min(sx0 + 1u, src.width  - 1u);
+            const uint32_t sy1 = std::min(sy0 + 1u, src.height - 1u);
+
+            for (int c = 0; c < 4; ++c) {
+                const uint32_t p00 = src.pixels[(sy0 * src.width + sx0) * 4u + c];
+                const uint32_t p10 = src.pixels[(sy0 * src.width + sx1) * 4u + c];
+                const uint32_t p01 = src.pixels[(sy1 * src.width + sx0) * 4u + c];
+                const uint32_t p11 = src.pixels[(sy1 * src.width + sx1) * 4u + c];
+                dst.pixels[(dy * dst.width + dx) * 4u + c] =
+                    static_cast<uint8_t>((p00 + p10 + p01 + p11 + 2u) / 4u);
+            }
+        }
+    }
+    return dst;
+}
+
+// Decode one embedded glTF image (buffer_view bytes) into a full mip chain.
+// Returns an empty optional when decoding fails.
+static std::optional<RawTexture> decodeEmbeddedImage(const uint8_t* data, std::size_t size)
+{
+    int w = 0, h = 0, comp = 0;
+    uint8_t* decoded = stbi_load_from_memory(
+        reinterpret_cast<const stbi_uc*>(data),
+        static_cast<int>(size),
+        &w, &h, &comp, 4 /* force RGBA */);
+
+    if (!decoded || w <= 0 || h <= 0) {
+        if (decoded) stbi_image_free(decoded);
+        return std::nullopt;
+    }
+
+    RawTexture tex;
+    tex.baseWidth  = static_cast<uint32_t>(w);
+    tex.baseHeight = static_cast<uint32_t>(h);
+
+    // Mip 0: the full-resolution image.
+    {
+        RawMipLevel mip0;
+        mip0.width  = tex.baseWidth;
+        mip0.height = tex.baseHeight;
+        const std::size_t byteCount = static_cast<std::size_t>(w) * h * 4u;
+        mip0.pixels.assign(decoded, decoded + byteCount);
+        tex.mips.push_back(std::move(mip0));
+    }
+    stbi_image_free(decoded);
+
+    // Generate additional mips until 1×1.
+    while (tex.mips.back().width > 1u || tex.mips.back().height > 1u) {
+        tex.mips.push_back(downsampleMip(tex.mips.back()));
+    }
+
+    return tex;
+}
+
+// Extract all embedded textures from a parsed cgltf_data.
+// Skips external URI images (logs a warning); only processes buffer_view-backed images.
+static std::vector<RawTexture> extractTextures(const cgltf_data* data)
+{
+    std::vector<RawTexture> result;
+    if (!data || data->images_count == 0) return result;
+
+    result.reserve(data->images_count);
+
+    for (cgltf_size i = 0; i < data->images_count; ++i) {
+        const cgltf_image& img = data->images[i];
+
+        if (!img.buffer_view) {
+            // External URI — not supported in v1 of this feature.
+            LOG_WARN("importGltf: image[{}] '{}' has no buffer_view (external URI?); skipping.",
+                     static_cast<uint32_t>(i),
+                     img.uri ? img.uri : "<unnamed>");
+            continue;
+        }
+
+        const cgltf_buffer_view* bv   = img.buffer_view;
+        const uint8_t*           base = static_cast<const uint8_t*>(bv->buffer->data);
+        if (!base) {
+            LOG_WARN("importGltf: image[{}] buffer data not loaded; skipping.", static_cast<uint32_t>(i));
+            continue;
+        }
+
+        const uint8_t*    imageData = base + bv->offset;
+        const std::size_t imageSize = bv->size;
+
+        auto tex = decodeEmbeddedImage(imageData, imageSize);
+        if (!tex.has_value()) {
+            LOG_WARN("importGltf: image[{}] failed to decode (stbi error: {}); skipping.",
+                     static_cast<uint32_t>(i), stbi_failure_reason());
+            continue;
+        }
+
+        LOG_INFO("importGltf: image[{}] decoded — {}×{}, {} mips.",
+                 static_cast<uint32_t>(i), tex->baseWidth, tex->baseHeight,
+                 static_cast<uint32_t>(tex->mips.size()));
+        result.push_back(std::move(*tex));
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // glTF parsing via cgltf
 // ---------------------------------------------------------------------------
 
@@ -200,87 +351,157 @@ bool readFloatAccessor(const cgltf_accessor* acc, std::vector<float>& out, int n
     return true;
 }
 
-// Attempt to parse the first mesh primitive from a glTF/glb file.
-// Returns false (without touching `out`) when the file is missing or invalid.
-bool tryParseGltf(const std::string& path, RawMesh& out) {
-    cgltf_options opts{};
-    cgltf_data*   data = nullptr;
+// Apply a cgltf column-major 4x4 world matrix to a position (with translation).
+static void applyMatPos(const float m[16], float x, float y, float z,
+                        float& ox, float& oy, float& oz) noexcept {
+    ox = m[0]*x + m[4]*y + m[8]*z  + m[12];
+    oy = m[1]*x + m[5]*y + m[9]*z  + m[13];
+    oz = m[2]*x + m[6]*y + m[10]*z + m[14];
+}
 
-    cgltf_result result = cgltf_parse_file(&opts, path.c_str(), &data);
-    if (result != cgltf_result_success || !data) {
-        return false;
-    }
+// Apply a cgltf world matrix to a direction vector (no translation), then renormalize.
+static void applyMatDir(const float m[16], float x, float y, float z,
+                        float& ox, float& oy, float& oz) noexcept {
+    ox = m[0]*x + m[4]*y + m[8]*z;
+    oy = m[1]*x + m[5]*y + m[9]*z;
+    oz = m[2]*x + m[6]*y + m[10]*z;
+    const float len = std::sqrt(ox*ox + oy*oy + oz*oz);
+    if (len > 1e-6f) { ox /= len; oy /= len; oz /= len; }
+}
 
-    // Load external buffers (.bin files / data URIs).
-    if (cgltf_load_buffers(&opts, data, path.c_str()) != cgltf_result_success) {
-        cgltf_free(data);
-        return false;
-    }
+// Append one glTF primitive (with its node world transform) into a merged RawMesh.
+// baseVertex is the vertex count already in merged before this call.
+static void appendPrimitive(const cgltf_primitive* prim,
+                            const float worldMat[16],
+                            RawMesh& merged,
+                            int& primitivesFound) {
+    if (prim->type != cgltf_primitive_type_triangles) return;
+    if (!prim->indices) return;
 
-    // Find the first mesh with at least one primitive that has POSITION.
-    const cgltf_mesh*      mesh      = nullptr;
-    const cgltf_primitive* primitive = nullptr;
+    const cgltf_accessor* posAcc  = nullptr;
+    const cgltf_accessor* normAcc = nullptr;
+    const cgltf_accessor* uvAcc   = nullptr;
 
-    for (cgltf_size mi = 0; mi < data->meshes_count && !primitive; ++mi) {
-        for (cgltf_size pi = 0; pi < data->meshes[mi].primitives_count; ++pi) {
-            const cgltf_primitive* prim = &data->meshes[mi].primitives[pi];
-            // Require indexed triangles with at least a POSITION attribute.
-            if (prim->type != cgltf_primitive_type_triangles) continue;
-            if (!prim->indices) continue;
-
-            bool hasPosition = false;
-            for (cgltf_size ai = 0; ai < prim->attributes_count; ++ai) {
-                if (prim->attributes[ai].type == cgltf_attribute_type_position) {
-                    hasPosition = true;
-                    break;
-                }
-            }
-            if (!hasPosition) continue;
-
-            mesh      = &data->meshes[mi];
-            primitive = prim;
-            break;
-        }
-    }
-
-    if (!primitive) {
-        cgltf_free(data);
-        return false;
-    }
-
-    // Extract per-attribute data.
-    const cgltf_accessor* posAcc    = nullptr;
-    const cgltf_accessor* normAcc   = nullptr;
-    const cgltf_accessor* uvAcc     = nullptr;
-
-    for (cgltf_size ai = 0; ai < primitive->attributes_count; ++ai) {
-        const cgltf_attribute& attr = primitive->attributes[ai];
+    for (cgltf_size ai = 0; ai < prim->attributes_count; ++ai) {
+        const cgltf_attribute& attr = prim->attributes[ai];
         if (attr.type == cgltf_attribute_type_position)  posAcc  = attr.data;
         if (attr.type == cgltf_attribute_type_normal)    normAcc = attr.data;
         if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0) uvAcc = attr.data;
     }
 
-    RawMesh raw;
+    if (!posAcc) return;
 
-    if (!readFloatAccessor(posAcc, raw.positions, 3)) {
+    std::vector<float> positions, normals, uvs;
+    if (!readFloatAccessor(posAcc, positions, 3)) return;
+    readFloatAccessor(normAcc, normals, 3);
+    readFloatAccessor(uvAcc,   uvs,    2);
+
+    const uint32_t primVertCount = static_cast<uint32_t>(positions.size() / 3);
+    const uint32_t baseVertex    = static_cast<uint32_t>(merged.positions.size() / 3);
+
+    // Apply node world transform to every position and normal.
+    for (uint32_t i = 0; i < primVertCount; ++i) {
+        applyMatPos(worldMat,
+            positions[i*3+0], positions[i*3+1], positions[i*3+2],
+            positions[i*3+0], positions[i*3+1], positions[i*3+2]);
+    }
+    if (normals.size() == positions.size()) {
+        for (uint32_t i = 0; i < primVertCount; ++i) {
+            applyMatDir(worldMat,
+                normals[i*3+0], normals[i*3+1], normals[i*3+2],
+                normals[i*3+0], normals[i*3+1], normals[i*3+2]);
+        }
+    }
+
+    // Append positions.
+    merged.positions.insert(merged.positions.end(), positions.begin(), positions.end());
+
+    // Normals: pad earlier slots with Y-up if this prim has them but prior ones didn't.
+    if (normals.size() == positions.size()) {
+        if (merged.normals.size() < static_cast<size_t>(baseVertex) * 3) {
+            const size_t prev = merged.normals.size() / 3;
+            merged.normals.resize(static_cast<size_t>(baseVertex) * 3, 0.0f);
+            for (size_t k = prev; k < baseVertex; ++k)
+                merged.normals[k * 3 + 1] = 1.0f; // Y-up default
+        }
+        merged.normals.insert(merged.normals.end(), normals.begin(), normals.end());
+    } else if (!merged.normals.empty()) {
+        // Prior prims had normals; pad new slots with Y-up.
+        const size_t prev = merged.normals.size() / 3;
+        merged.normals.resize(merged.normals.size() + static_cast<size_t>(primVertCount) * 3, 0.0f);
+        for (size_t k = prev; k < prev + primVertCount; ++k)
+            merged.normals[k * 3 + 1] = 1.0f;
+    }
+
+    // UVs: same strategy; default to (0,0).
+    if (uvs.size() == static_cast<size_t>(primVertCount) * 2) {
+        if (merged.uvs.size() < static_cast<size_t>(baseVertex) * 2)
+            merged.uvs.resize(static_cast<size_t>(baseVertex) * 2, 0.0f);
+        merged.uvs.insert(merged.uvs.end(), uvs.begin(), uvs.end());
+    } else if (!merged.uvs.empty()) {
+        merged.uvs.resize(merged.uvs.size() + static_cast<size_t>(primVertCount) * 2, 0.0f);
+    }
+
+    // Indices: offset by baseVertex so they address the merged buffer.
+    const cgltf_accessor* idxAcc = prim->indices;
+    for (cgltf_size i = 0; i < idxAcc->count; ++i)
+        merged.indices.push_back(baseVertex + static_cast<uint32_t>(cgltf_accessor_read_index(idxAcc, i)));
+
+    ++primitivesFound;
+}
+
+// Recursively walk a scene node tree, collecting mesh primitives into merged.
+static void walkNode(const cgltf_node* node, RawMesh& merged, int& primitivesFound) {
+    if (node->mesh) {
+        float worldMat[16];
+        cgltf_node_transform_world(node, worldMat);
+        for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi)
+            appendPrimitive(&node->mesh->primitives[pi], worldMat, merged, primitivesFound);
+    }
+    for (cgltf_size ci = 0; ci < node->children_count; ++ci)
+        walkNode(node->children[ci], merged, primitivesFound);
+}
+
+// Parse ALL mesh primitives from a glTF/glb file into one merged RawMesh,
+// applying each scene node's world transform so multi-object levels are correct.
+// Also extracts embedded textures into outTextures.
+// Returns false (without touching `out`) when the file is missing or has no valid primitives.
+bool tryParseGltf(const std::string& path, RawMesh& out, std::vector<RawTexture>& outTextures) {
+    cgltf_options opts{};
+    cgltf_data*   data = nullptr;
+
+    if (cgltf_parse_file(&opts, path.c_str(), &data) != cgltf_result_success || !data)
+        return false;
+
+    if (cgltf_load_buffers(&opts, data, path.c_str()) != cgltf_result_success) {
         cgltf_free(data);
         return false;
     }
 
-    // Normals and UVs are optional — leave vectors empty if absent.
-    readFloatAccessor(normAcc, raw.normals, 3);
-    readFloatAccessor(uvAcc,   raw.uvs,    2);
+    RawMesh merged;
+    int primitivesFound = 0;
 
-    // Extract indices.
-    const cgltf_accessor* idxAcc = primitive->indices;
-    const cgltf_size indexCount = idxAcc->count;
-    raw.indices.resize(indexCount);
-    for (cgltf_size i = 0; i < indexCount; ++i) {
-        raw.indices[i] = static_cast<uint32_t>(cgltf_accessor_read_index(idxAcc, i));
+    // Walk the default scene (or first scene) so node world transforms are correct.
+    // Fall back to a flat node walk if there are no scenes (rare but valid glTF).
+    if (data->scenes_count > 0) {
+        const cgltf_scene& scene = data->scene ? *data->scene : data->scenes[0];
+        for (cgltf_size ni = 0; ni < scene.nodes_count; ++ni)
+            walkNode(scene.nodes[ni], merged, primitivesFound);
+    } else {
+        // No scene — iterate all nodes with identity world transform fallback.
+        for (cgltf_size ni = 0; ni < data->nodes_count; ++ni)
+            walkNode(&data->nodes[ni], merged, primitivesFound);
     }
 
+    // Extract embedded textures (best-effort — failures are warned, not fatal).
+    outTextures = extractTextures(data);
+
     cgltf_free(data);
-    out = std::move(raw);
+
+    if (primitivesFound == 0)
+        return false;
+
+    out = std::move(merged);
     return true;
 }
 
@@ -469,12 +690,27 @@ CollisionData buildConvexHullCollision(const OptimizedMesh& mesh) {
 }
 
 // ---------------------------------------------------------------------------
-// .easset writer — version 1 (no collision) or version 2 (optional collision)
+// .easset writer
+// version 1: MESH only (no collision, no textures)
+// version 2: MESH + optional COLL
+// version 3: MESH + optional COLL + zero or more TEX sections
 // ---------------------------------------------------------------------------
 
-bool writeEasset(const std::filesystem::path& output,
-                 const OptimizedMesh& mesh,
-                 const CollisionData* collision)
+// Compute the byte size of one TEX section (header + all mip headers + pixel data).
+static uint32_t computeTexSectionSize(const RawTexture& tex)
+{
+    uint32_t size = sizeof(TexSectionHeader);
+    for (const auto& mip : tex.mips) {
+        size += sizeof(TexMipHeader);
+        size += static_cast<uint32_t>(mip.pixels.size());
+    }
+    return size;
+}
+
+bool writeEasset(const std::filesystem::path&   output,
+                 const OptimizedMesh&            mesh,
+                 const CollisionData*            collision,
+                 const std::vector<RawTexture>&  textures)
 {
     const uint32_t vertexCount = static_cast<uint32_t>(mesh.vertices.size());
     const uint32_t indexCount  = static_cast<uint32_t>(mesh.indices.size());
@@ -484,9 +720,19 @@ bool writeEasset(const std::filesystem::path& output,
     const uint32_t indexDataSize   = indexCount  * static_cast<uint32_t>(sizeof(uint32_t));
     const uint32_t meshSectionSize = meshHeaderSize + vertexDataSize + indexDataSize;
 
-    const bool hasCollision    = (collision != nullptr);
-    const uint16_t fileVersion = hasCollision ? 2u : 1u;
-    const uint32_t tocEntries  = hasCollision ? 2u : 1u;
+    const bool hasCollision = (collision != nullptr);
+    const bool hasTextures  = !textures.empty();
+
+    // Version bumps: 1 (mesh only) → 2 (+ coll) → 3 (+ tex)
+    uint16_t fileVersion;
+    if (hasTextures)       fileVersion = 3u;
+    else if (hasCollision) fileVersion = 2u;
+    else                   fileVersion = 1u;
+
+    // TOC entry count: MESH always, +COLL if present, +1 per texture.
+    const uint32_t tocEntries = 1u
+        + (hasCollision ? 1u : 0u)
+        + static_cast<uint32_t>(textures.size());
 
     // Compute collision section size when needed.
     uint32_t collSectionSize = 0;
@@ -496,12 +742,19 @@ bool writeEasset(const std::filesystem::path& output,
             + static_cast<uint32_t>(collision->indices.size())  * sizeof(uint32_t);
     }
 
+    // Compute per-texture section sizes.
+    std::vector<uint32_t> texSectionSizes;
+    texSectionSizes.reserve(textures.size());
+    for (const auto& tex : textures)
+        texSectionSizes.push_back(computeTexSectionSize(tex));
+
     // Layout:
     //   [0..19]       EassHeader (20 bytes)
-    //   [20..19+16*N] TocEntry × N  (N = 1 or 2, each 16 bytes)
+    //   [20..]        TocEntry × tocEntries  (each 16 bytes)
     //   pad to 64
     //   MESH section
     //   [optional] COLL section (64-byte aligned)
+    //   [optional] TEX section × N (each 64-byte aligned)
     constexpr uint32_t kHeaderSize   = sizeof(EassHeader);   // 20
     constexpr uint32_t kTocEntrySize = sizeof(TocEntry);     // 16
     const uint32_t tocOffset         = kHeaderSize;
@@ -514,6 +767,14 @@ bool writeEasset(const std::filesystem::path& output,
     if (hasCollision) {
         collSectionOffset = (totalSize + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
         totalSize         = collSectionOffset + collSectionSize;
+    }
+
+    std::vector<uint32_t> texSectionOffsets;
+    texSectionOffsets.reserve(textures.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(textures.size()); ++i) {
+        const uint32_t alignedOffset = (totalSize + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
+        texSectionOffsets.push_back(alignedOffset);
+        totalSize = alignedOffset + texSectionSizes[i];
     }
 
     std::filesystem::create_directories(output.parent_path());
@@ -539,7 +800,7 @@ bool writeEasset(const std::filesystem::path& output,
     meshToc.reserved = 0;
     fs.write(reinterpret_cast<const char*>(&meshToc), sizeof(meshToc));
 
-    // COLL TocEntry (version 2 only)
+    // COLL TocEntry (version 2+ only)
     if (hasCollision) {
         TocEntry collToc{};
         std::memcpy(collToc.id, "COLL", 4);
@@ -547,6 +808,16 @@ bool writeEasset(const std::filesystem::path& output,
         collToc.size     = collSectionSize;
         collToc.reserved = 0;
         fs.write(reinterpret_cast<const char*>(&collToc), sizeof(collToc));
+    }
+
+    // TEX TocEntries (version 3 only)
+    for (uint32_t i = 0; i < static_cast<uint32_t>(textures.size()); ++i) {
+        TocEntry texToc{};
+        texToc.id[0] = 'T'; texToc.id[1] = 'E'; texToc.id[2] = 'X'; texToc.id[3] = '\0';
+        texToc.offset   = texSectionOffsets[i];
+        texToc.size     = texSectionSizes[i];
+        texToc.reserved = 0;
+        fs.write(reinterpret_cast<const char*>(&texToc), sizeof(texToc));
     }
 
     // Padding before MESH section
@@ -571,7 +842,7 @@ bool writeEasset(const std::filesystem::path& output,
     fs.write(reinterpret_cast<const char*>(mesh.indices.data()),
              static_cast<std::streamsize>(indexDataSize));
 
-    // COLL section (version 2 only)
+    // COLL section (version 2+ only)
     if (hasCollision) {
         padTo64(fs);
 
@@ -596,6 +867,109 @@ bool writeEasset(const std::filesystem::path& output,
         }
     }
 
+    // TEX sections (version 3 only)
+    for (const auto& tex : textures) {
+        padTo64(fs);
+
+        TexSectionHeader tsh{};
+        tsh.dxgiFormat = tex.dxgiFormat;
+        tsh.baseWidth  = tex.baseWidth;
+        tsh.baseHeight = tex.baseHeight;
+        tsh.mipCount   = static_cast<uint32_t>(tex.mips.size());
+        fs.write(reinterpret_cast<const char*>(&tsh), sizeof(tsh));
+
+        for (const auto& mip : tex.mips) {
+            TexMipHeader tmh{};
+            tmh.width    = mip.width;
+            tmh.height   = mip.height;
+            tmh.dataSize = static_cast<uint32_t>(mip.pixels.size());
+            fs.write(reinterpret_cast<const char*>(&tmh), sizeof(tmh));
+            fs.write(reinterpret_cast<const char*>(mip.pixels.data()),
+                     static_cast<std::streamsize>(mip.pixels.size()));
+        }
+    }
+
+    return fs.good();
+}
+
+// ---------------------------------------------------------------------------
+// Texture-only .easset writer
+// version 3: TEX sections only (no MESH, no COLL)
+// ---------------------------------------------------------------------------
+
+// Write a .easset containing only TEX sections (no MESH or COLL sections).
+// Used by importPng() for standalone image assets.
+static bool writeTextureOnlyEasset(const std::filesystem::path&   output,
+                                    const std::vector<RawTexture>& textures)
+{
+    if (textures.empty()) return false;
+
+    const uint32_t tocEntryCount = static_cast<uint32_t>(textures.size());
+
+    std::vector<uint32_t> texSectionSizes;
+    texSectionSizes.reserve(textures.size());
+    for (const auto& tex : textures)
+        texSectionSizes.push_back(computeTexSectionSize(tex));
+
+    constexpr uint32_t kHeaderSize   = sizeof(EassHeader);
+    constexpr uint32_t kTocEntrySize = sizeof(TocEntry);
+    const uint32_t rawDataStart      = kHeaderSize + tocEntryCount * kTocEntrySize;
+    const uint32_t firstTexOffset    =
+        (rawDataStart + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
+
+    std::vector<uint32_t> texSectionOffsets;
+    texSectionOffsets.reserve(textures.size());
+    uint32_t totalSize = firstTexOffset;
+    for (uint32_t i = 0; i < tocEntryCount; ++i) {
+        const uint32_t alignedOffset = (totalSize + kAlignmentBytes - 1) & ~(kAlignmentBytes - 1);
+        texSectionOffsets.push_back(alignedOffset);
+        totalSize = alignedOffset + texSectionSizes[i];
+    }
+
+    std::filesystem::create_directories(output.parent_path());
+
+    std::fstream fs(output, std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!fs.is_open()) return false;
+
+    EassHeader hdr{};
+    std::memcpy(hdr.magic, "EASS", 4);
+    hdr.version       = 3;
+    hdr.assetType     = 0;
+    hdr.totalSize     = totalSize;
+    hdr.tocOffset     = kHeaderSize;
+    hdr.tocEntryCount = tocEntryCount;
+    fs.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+
+    for (uint32_t i = 0; i < tocEntryCount; ++i) {
+        TocEntry texToc{};
+        texToc.id[0] = 'T'; texToc.id[1] = 'E'; texToc.id[2] = 'X'; texToc.id[3] = '\0';
+        texToc.offset   = texSectionOffsets[i];
+        texToc.size     = texSectionSizes[i];
+        texToc.reserved = 0;
+        fs.write(reinterpret_cast<const char*>(&texToc), sizeof(texToc));
+    }
+
+    for (const auto& tex : textures) {
+        padTo64(fs);
+
+        TexSectionHeader tsh{};
+        tsh.dxgiFormat = tex.dxgiFormat;
+        tsh.baseWidth  = tex.baseWidth;
+        tsh.baseHeight = tex.baseHeight;
+        tsh.mipCount   = static_cast<uint32_t>(tex.mips.size());
+        fs.write(reinterpret_cast<const char*>(&tsh), sizeof(tsh));
+
+        for (const auto& mip : tex.mips) {
+            TexMipHeader tmh{};
+            tmh.width    = mip.width;
+            tmh.height   = mip.height;
+            tmh.dataSize = static_cast<uint32_t>(mip.pixels.size());
+            fs.write(reinterpret_cast<const char*>(&tmh), sizeof(tmh));
+            fs.write(reinterpret_cast<const char*>(mip.pixels.data()),
+                     static_cast<std::streamsize>(mip.pixels.size()));
+        }
+    }
+
     return fs.good();
 }
 
@@ -614,16 +988,19 @@ ImportResult importGltf(const std::filesystem::path& source,
     // format, unsupported primitive) fall back to the built-in unit-cube mesh
     // so that pipeline tests that supply a dummy path still pass.
     RawMesh raw;
-    const bool parsed = tryParseGltf(source.string(), raw);
+    std::vector<RawTexture> textures;
+    const bool parsed = tryParseGltf(source.string(), raw, textures);
     if (!parsed) {
         LOG_WARN("importGltf: could not parse '{}' — using built-in unit-cube fallback.",
                  source.string());
         raw = buildUnitCubeRaw();
+        textures.clear(); // no textures for the fallback cube
     } else {
-        LOG_INFO("importGltf: parsed '{}' ({} vertices, {} indices).",
+        LOG_INFO("importGltf: parsed '{}' — merged all primitives ({} vertices, {} indices, {} textures).",
                  source.string(),
                  static_cast<uint32_t>(raw.positions.size() / 3),
-                 static_cast<uint32_t>(raw.indices.size()));
+                 static_cast<uint32_t>(raw.indices.size()),
+                 static_cast<uint32_t>(textures.size()));
     }
 
     // Run meshoptimizer passes over the raw geometry.
@@ -641,15 +1018,64 @@ ImportResult importGltf(const std::filesystem::path& source,
         collPtr = &collData;
     }
 
-    if (!writeEasset(output, optimized, collPtr)) {
+    if (!writeEasset(output, optimized, collPtr, textures)) {
         return { false, "Write error while producing: " + output.string() };
     }
 
-    LOG_INFO("importGltf: wrote '{}' ({} vertices, {} indices, collision={}).",
+    LOG_INFO("importGltf: wrote '{}' ({} vertices, {} indices, collision={}, textures={}).",
              output.string(),
              static_cast<uint32_t>(optimized.vertices.size()),
              static_cast<uint32_t>(optimized.indices.size()),
-             settings.generateCollision ? "yes" : "no");
+             settings.generateCollision ? "yes" : "no",
+             static_cast<uint32_t>(textures.size()));
+
+    return { true, {} };
+}
+
+ImportResult importPng(const std::filesystem::path& source,
+                       const std::filesystem::path& output)
+{
+    int w = 0, h = 0, comp = 0;
+    stbi_uc* decoded = stbi_load(source.string().c_str(), &w, &h, &comp, 4 /* force RGBA */);
+
+    if (!decoded || w <= 0 || h <= 0) {
+        if (decoded) stbi_image_free(decoded);
+        return { false,
+            "importPng: stbi_load failed for '" + source.string()
+            + "': " + stbi_failure_reason() };
+    }
+
+    RawTexture tex;
+    tex.baseWidth  = static_cast<uint32_t>(w);
+    tex.baseHeight = static_cast<uint32_t>(h);
+
+    {
+        RawMipLevel mip0;
+        mip0.width  = tex.baseWidth;
+        mip0.height = tex.baseHeight;
+        const std::size_t byteCount =
+            static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+        mip0.pixels.assign(decoded, decoded + byteCount);
+        tex.mips.push_back(std::move(mip0));
+    }
+    stbi_image_free(decoded);
+
+    while (tex.mips.back().width > 1u || tex.mips.back().height > 1u)
+        tex.mips.push_back(downsampleMip(tex.mips.back()));
+
+    const uint32_t logW    = tex.baseWidth;
+    const uint32_t logH    = tex.baseHeight;
+    const uint32_t logMips = static_cast<uint32_t>(tex.mips.size());
+
+    std::vector<RawTexture> texVec;
+    texVec.push_back(std::move(tex));
+
+    if (!writeTextureOnlyEasset(output, texVec)) {
+        return { false, "importPng: write error while producing: " + output.string() };
+    }
+
+    LOG_INFO("importPng: wrote '{}' ({}x{}, {} mips).",
+             output.string(), logW, logH, logMips);
 
     return { true, {} };
 }

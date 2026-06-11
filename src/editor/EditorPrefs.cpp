@@ -30,6 +30,8 @@ void EditorPrefs::loadFromDisk(const std::filesystem::path& prefsPath) {
         if (auto p = tbl["pie_port"].value<int64_t>())
             piePort_ = static_cast<uint16_t>(*p);
 
+        pieMouseCapture_ = tbl["editor"]["pieMouseCapture"].value_or(true);
+
     } catch (const toml::parse_error& e) {
         LOG_WARN("EditorPrefs: failed to parse '{}': {}", prefsPath.string(), e.description());
     }
@@ -43,9 +45,13 @@ void EditorPrefs::saveToDisk(const std::filesystem::path& prefsPath) const {
     for (const auto& p : recentScenes_)
         arr.push_back(p.string());
 
+    toml::table editorTbl;
+    editorTbl.insert_or_assign("pieMouseCapture", pieMouseCapture_);
+
     toml::table tbl;
     tbl.insert_or_assign("recent_scenes", arr);
     tbl.insert_or_assign("pie_port", static_cast<int64_t>(piePort_));
+    tbl.insert_or_assign("editor", editorTbl);
 
     std::ofstream out(prefsPath);
     if (!out) {

@@ -41,11 +41,14 @@ VSOutput main(VSInput IN) {
     // Bitangent sign encoded in bit 31 of packedTangent: 0 -> +1, 1 -> -1.
     float bitangentSign = (IN.tangentPacked & 0x80000000u) ? -1.0f : 1.0f;
 
+    float3 objNorm = UnpackXYZ(IN.normalPacked);
+    float3 objTan  = UnpackXYZ(IN.tangentPacked);
+
     VSOutput OUT;
     OUT.svPos    = mul(worldPos4, gPerFrame.viewProjMatrix);
     OUT.worldPos = worldPos4.xyz;
-    OUT.worldNorm = UnpackXYZ(IN.normalPacked);
-    OUT.worldTan  = float4(UnpackXYZ(IN.tangentPacked), bitangentSign);
+    OUT.worldNorm = normalize(mul(float4(objNorm, 0.0f), gPerObject.worldMatrix).xyz);
+    OUT.worldTan  = float4(normalize(mul(float4(objTan, 0.0f), gPerObject.worldMatrix).xyz), bitangentSign);
     OUT.uv        = IN.uv;
     OUT.matIdx    = gPerObject.materialIndex;
     return OUT;

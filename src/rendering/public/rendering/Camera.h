@@ -21,27 +21,31 @@ namespace engine::rendering {
     };
 
     // ECS component — attach alongside Camera to enable FPS-style mouse look.
-    // System reads core::events::RawInputState; writes Transform::position/rotation.
+    // System reads InputSystem::state(); writes Transform::position/rotation.
     // Movement: WASD + Q/E. Sprint: Shift. Pitch clamped to ±89 degrees.
+    // kComponentId = 17: registered after Camera (16).
     struct FpsCameraController {
-        float moveSpeed       { 5.0f };   // metres per second
-        float lookSensitivity { 0.1f };   // degrees per raw mouse unit
-        float yaw             { 0.0f };   // degrees, world Y-axis
-        float pitch           { 0.0f };   // degrees, clamped ±89
+        static constexpr engine::core::ecs::ComponentTypeId kComponentId = 17;
+
+        float   moveSpeed        { 5.0f };   // metres per second
+        float   lookSensitivity  { 0.1f };   // degrees per raw mouse unit
+        float   yaw              { 0.0f };   // degrees, world Y-axis
+        float   pitch            { 0.0f };   // degrees, clamped ±89
+        float   eyeHeight        { 1.7f };   // metres above spawn-point origin
+        float   verticalVelocity { 0.0f };   // m/s, integrated by FpsCameraSystem gravity
+        bool    active           { true };   // when false, system skips this entity
+        bool    isGrounded       { false };  // set by FpsCameraSystem ground check
+        uint8_t _pad0            { 0 };
+        uint8_t _pad1            { 0 };
     };
+
+    static_assert(sizeof(FpsCameraController) == 28,
+        "FpsCameraController layout changed — update padding or serialisation");
 
     // View matrix from a camera's world transform (right-handed, Y-up).
     core::math::Mat4 cameraViewMatrix(const core::math::Transform& t) noexcept;
 
     // Reverse-Z perspective projection (nearZ -> depth 1.0, farZ -> depth 0.0).
     core::math::Mat4 cameraProjMatrix(const Camera& cam, float aspectRatio) noexcept;
-
-    // System tick: reads InputSystem state, updates transform (position/rotation)
-    // and the FpsCameraController's stored yaw/pitch.
-    // Called once per frame in the Update phase for every entity that has both
-    // FpsCameraController and Transform components.
-    void fpsCameraUpdate(FpsCameraController& ctrl,
-                         core::math::Transform& transform,
-                         float dt) noexcept;
 
 } // namespace engine::rendering

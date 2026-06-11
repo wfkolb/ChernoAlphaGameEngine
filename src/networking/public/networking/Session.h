@@ -4,6 +4,8 @@
 #include <memory>
 #include <span>
 #include <utility>
+#include <vector>
+#include <cstdint>
 
 namespace engine::networking {
 
@@ -31,9 +33,17 @@ public:
     // The local address this session is bound to.
     Endpoint localEndpoint() const;
 
+    // Set a XOR obfuscation key applied to all outgoing and incoming packets.
+    // Both peers must use the same key. Empty key disables obfuscation.
+    // NOT cryptographic — a future DTLS layer should replace this entirely.
+    void setObfuscationKey(std::span<const uint8_t> key) {
+        obfuscationKey_.assign(key.begin(), key.end());
+    }
+
 private:
     std::unique_ptr<ReliableChannel> channel_;
     MessageCallback onMessage_;
+    std::vector<uint8_t> obfuscationKey_;
 };
 
 } // namespace engine::networking

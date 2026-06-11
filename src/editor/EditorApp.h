@@ -7,6 +7,7 @@
 #include "editor/SelectionSystem.h"
 #include "editor/UndoStack.h"
 #include "editor/PIEController.h"
+#include "editor/ThumbnailRenderer.h"
 #include "editor/panels/SceneHierarchyPanel.h"
 #include "editor/panels/InspectorPanel.h"
 #include "editor/panels/ViewportPanel.h"
@@ -15,10 +16,18 @@
 #include "editor/panels/ScenePropertiesPanel.h"
 #include "editor/panels/PhysicsMaterialsPanel.h"
 #include "editor/panels/CollisionLayerPanel.h"
+#include "editor/MeshPreviewPanel.h"
+
+#include <app/MeshRenderSystem.h>
+#include <rendering/FrameGraph.h>
+#include <rendering/MaterialManager.h>
+#include <rendering/MeshManager.h>
+#include <rendering/GpuDevice.h>
 
 #include <core/ecs/Entity.h>
 #include <core/scene/SceneManager.h>
 #include <physics/PhysicsMaterialTable.h>
+#include <physics/PhysicsWorld.h>
 #include <physics/QueryFilter.h>
 
 #include <core/ecs/EntityFactory.h>
@@ -27,6 +36,8 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace engine::rendering { class Window; class GpuDevice; }
 
@@ -46,6 +57,10 @@ public:
     EditorApp(const EditorApp&)            = delete;
     EditorApp& operator=(const EditorApp&) = delete;
 
+    // Optional: call before init() to override the project root used for the
+    // asset browser, scene dialogs, and import output paths.
+    void setProjectRoot(std::filesystem::path root);
+
     // Create window, device, ImGui. Returns false on fatal init failure (e.g.
     // no DX12 / headless), in which case run() must not be called.
     bool init();
@@ -54,6 +69,10 @@ public:
     void run();
 
     void shutdown();
+
+    // Access the entity factory after init() to register game-specific archetypes.
+    // Game-side editor mains call registerFpsArchetypes(app.entityFactory()) before run().
+    core::ecs::EntityFactory& entityFactory();
 
 private:
     void registerComponents();        // World + SceneSerializer component registration
@@ -71,6 +90,16 @@ private:
     void openSceneDialog();
     void saveSceneDialog();
 
+    // Create / destroy the separate game window used during PIE.
+    void createPieWindow();
+    void destroyPieWindow();
+
+    // Create (or resize) the offscreen viewport render target.
+    void createViewportRt(uint32_t w, uint32_t h);
+
+    // Wire mesh-load/unload delegates on a newly activated scene.
+    void wireScene(core::scene::Scene& scene);
+
     // Returns true if it is safe to discard the current scene (either it is
     // not dirty, or the user chose Save or Discard in the modal).  When the
     // scene is dirty this opens an ImGui modal and returns false immediately;
@@ -86,12 +115,29 @@ private:
     struct Gpu;                       // hides DX12 + ImGui backend details
     std::unique_ptr<Gpu>              gpu_;
 
+    // Mesh rendering for the viewport.
+    std::unique_ptr<rendering::MaterialManager> materialManager_;
+    app::MeshRenderSystem                       meshRenderSystem_;
+    rendering::FrameGraph                   sceneFrameGraph_;
+    rendering::FrameGraph                   pieFrameGraph_;  // used during PIE to render to game window
+    std::unique_ptr<rendering::MeshManager> meshManager_;   // lazy: after first beginFrame
+    ThumbnailRenderer                       thumbnailRenderer_;
+
+    struct PendingMeshLoad {
+        std::string assetPath;
+        uint32_t    entityIndex;
+        uint32_t    entityGeneration;
+    };
+    std::vector<PendingMeshLoad>             pendingMeshLoads_;
+    std::unordered_map<uint32_t, std::string> registeredMeshPaths_; // entityIndex → last uploaded path
+
     core::ecs::EntityFactory          entityFactory_;
 
     core::scene::SceneManager         sceneManager_;
     core::scene::Scene*               activeScene_ = nullptr;
 
     EditorCamera                      camera_;
+    EditorCamera::State               prePieCameraState_{};
     SelectionSystem                   picking_;
     UndoStack                         undo_;
     PIEController                     pie_;
@@ -105,6 +151,15 @@ private:
     ScenePropertiesPanel              scenePropsPanel_;
     PhysicsMaterialsPanel             physMatPanel_;
     CollisionLayerPanel               collisionLayerPanel_;
+    MeshPreviewPanel                  previewPanel_;
+
+    // Physics world used during PIE — created in init(), wired to the active
+    // scene before PIE starts and detached on PIE stop.
+    std::unique_ptr<physics::PhysicsWorld> editorPhysicsWorld_;
+
+    // Separate game window opened when PIE starts; destroyed when PIE stops.
+    // Defined in EditorApp.cpp (engine::editor namespace, not nested).
+    std::unique_ptr<struct PieWindow> pieWindow_;
 
     physics::PhysicsMaterialTable     physMatTable_;
     physics::QueryFilter              globalQueryFilter_;
@@ -131,6 +186,10 @@ private:
     std::string contentRoot_;
     std::wstring currentScenePath_;
 
+    // Set via setProjectRoot() (from --project CLI arg). Overrides contentRoot_
+    // from Config when non-empty. Stored as absolute path.
+    std::filesystem::path projectRoot_;
+
     // E1 — Unsaved-changes modal state.
     bool          unsavedModalOpen_  = false;
     PendingAction pendingAction_     = PendingAction::None;
@@ -143,6 +202,13 @@ private:
     // E8 — Error dialog. Non-empty triggers the modal on the next frame draw.
     std::string errorMsg_;
     void drawErrorDialog();
+
+    // VM-4: current viewmode for the editor viewport (PIE always uses Lit).
+    app::ViewMode viewMode_ = app::ViewMode::Lit;
+
+    // TX-6: tracks uploaded texture assets to avoid re-uploading the same .easset.
+    std::unordered_map<std::string, uint32_t> uploadedTexturePaths_; // absPath → srvSlot
+    std::unordered_map<uint32_t, std::string> textureSrvNames_;      // srvSlot → display name
 };
 
 } // namespace engine::editor

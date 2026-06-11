@@ -1,6 +1,8 @@
 #pragma once
 #ifdef ENGINE_DEVREL
 
+#include "editor/ComponentTraits.h"
+
 #include <core/ecs/Entity.h>
 #include <core/ecs/PrefabInstance.h>
 
@@ -23,6 +25,19 @@ public:
     void registerWidget(core::ecs::ComponentTypeId id, Widget widget);
     const Widget* find(core::ecs::ComponentTypeId id) const;
     bool          hasWidget(core::ecs::ComponentTypeId id) const noexcept;
+
+    // Reads ComponentTraits<T>::makeWidget() and registers the result.
+    // No-op when makeWidget() returns an empty function (component intentionally
+    // has no editor widget — but validateCoverage() will still catch it).
+    template <typename T>
+    void registerTraits() {
+        ComponentWidget w = ComponentTraits<T>::makeWidget();
+        if (w) registerWidget(T::kComponentId, std::move(w));
+    }
+
+    // ENGINE_ASSERTs that every ECS-registered component (meta.name != nullptr)
+    // has a widget. Call at the end of EditorApp::registerComponentWidgets().
+    void validateCoverage() const;
 
 private:
     std::array<Widget, 256> widgets_{};

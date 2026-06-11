@@ -63,6 +63,9 @@ static void writeGlobals(ByteWriter& bw, const core::scene::SceneGlobals& g) {
     bw.writeU32(static_cast<uint32_t>(g.maxPlayers));
     bw.writeString(g.sceneName);
     bw.writeString(g.gameMode);
+    // C1: shadow split lambda appended after existing fields (backward compatible:
+    // old readers ignore trailing bytes; new readers default to 0.95 when absent).
+    bw.writeF32(g.shadowSplitLambda);
 }
 
 static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
@@ -81,6 +84,13 @@ static bool readGlobals(ByteReader& br, core::scene::SceneGlobals& g) {
     g.maxPlayers     = static_cast<int>(br.readU32());
     g.sceneName      = br.readString();
     g.gameMode       = br.readString();
+    if (!br.ok()) return false;
+    // C1: shadowSplitLambda — optional trailing field; default 0.95 when absent.
+    if (br.remaining() >= sizeof(float)) {
+        g.shadowSplitLambda = br.readF32();
+    } else {
+        g.shadowSplitLambda = 0.95f;
+    }
     return br.ok();
 }
 

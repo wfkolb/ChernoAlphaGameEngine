@@ -25,8 +25,9 @@ target_link_libraries(engine_rendering PRIVATE Microsoft::DirectX-Headers)
 
 # ---------------------------------------------------------------------------
 # Shader compilation via DXC
-# Output .cso files go to ${CMAKE_BINARY_DIR}/shaders/ so the executable can
-# find them at runtime as shaders/FlatShadeVS.cso etc.
+# Source HLSL lives in ${CMAKE_SOURCE_DIR}/shaders/<pass>/.
+# Output .cso files go to ${CMAKE_BINARY_DIR}/shaders/ so executables can
+# find them at runtime as shaders/OpaqueVS.cso etc.
 # ---------------------------------------------------------------------------
 find_program(DXC_EXECUTABLE dxc
     HINTS
@@ -36,38 +37,89 @@ find_program(DXC_EXECUTABLE dxc
 
 if(DXC_EXECUTABLE)
     set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+    # Use the engine's own shaders directory regardless of which project is top-level.
+    # CMAKE_CURRENT_SOURCE_DIR is engine/src/rendering; ../../shaders reaches engine/shaders.
+    get_filename_component(SHADER_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../shaders" ABSOLUTE)
     file(MAKE_DIRECTORY "${SHADER_OUTPUT_DIR}")
 
-    # FlatShadeVS — vs_6_0
+    # OpaqueVS — vs_6_6
     add_custom_command(
-        OUTPUT  "${SHADER_OUTPUT_DIR}/FlatShadeVS.cso"
-        COMMAND "${DXC_EXECUTABLE}"
-                -T vs_6_0
-                -E main
-                -Fo "${SHADER_OUTPUT_DIR}/FlatShadeVS.cso"
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/FlatShadeVS.hlsl"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/FlatShadeVS.hlsl"
-        COMMENT "Compiling FlatShadeVS.hlsl -> FlatShadeVS.cso"
+        OUTPUT  "${SHADER_OUTPUT_DIR}/OpaqueVS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T vs_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/OpaqueVS.cso"
+                "${SHADER_SOURCE_DIR}/opaque/OpaqueVS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/opaque/OpaqueVS.hlsl"
+                "${SHADER_SOURCE_DIR}/common/CommonTypes.hlsli"
+        COMMENT "Compiling OpaqueVS.hlsl -> OpaqueVS.cso"
         VERBATIM
     )
 
-    # FlatShadePS — ps_6_0
+    # OpaquePS — ps_6_6
     add_custom_command(
-        OUTPUT  "${SHADER_OUTPUT_DIR}/FlatShadePS.cso"
-        COMMAND "${DXC_EXECUTABLE}"
-                -T ps_6_0
-                -E main
-                -Fo "${SHADER_OUTPUT_DIR}/FlatShadePS.cso"
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/FlatShadePS.hlsl"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/FlatShadePS.hlsl"
-        COMMENT "Compiling FlatShadePS.hlsl -> FlatShadePS.cso"
+        OUTPUT  "${SHADER_OUTPUT_DIR}/OpaquePS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T ps_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/OpaquePS.cso"
+                "${SHADER_SOURCE_DIR}/opaque/OpaquePS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/opaque/OpaquePS.hlsl"
+                "${SHADER_SOURCE_DIR}/common/CommonTypes.hlsli"
+        COMMENT "Compiling OpaquePS.hlsl -> OpaquePS.cso"
+        VERBATIM
+    )
+
+    # ShadowVS — vs_6_6
+    add_custom_command(
+        OUTPUT  "${SHADER_OUTPUT_DIR}/ShadowVS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T vs_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/ShadowVS.cso"
+                "${SHADER_SOURCE_DIR}/shadow/ShadowVS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/shadow/ShadowVS.hlsl"
+                "${SHADER_SOURCE_DIR}/common/CommonTypes.hlsli"
+        COMMENT "Compiling ShadowVS.hlsl -> ShadowVS.cso"
+        VERBATIM
+    )
+
+    # ShadowPS — ps_6_6
+    add_custom_command(
+        OUTPUT  "${SHADER_OUTPUT_DIR}/ShadowPS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T ps_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/ShadowPS.cso"
+                "${SHADER_SOURCE_DIR}/shadow/ShadowPS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/shadow/ShadowPS.hlsl"
+        COMMENT "Compiling ShadowPS.hlsl -> ShadowPS.cso"
+        VERBATIM
+    )
+
+    # DebugLineVS — vs_6_6
+    add_custom_command(
+        OUTPUT  "${SHADER_OUTPUT_DIR}/DebugLineVS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T vs_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/DebugLineVS.cso"
+                "${SHADER_SOURCE_DIR}/debug/DebugLineVS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/debug/DebugLineVS.hlsl"
+        COMMENT "Compiling DebugLineVS.hlsl -> DebugLineVS.cso"
+        VERBATIM
+    )
+
+    # DebugLinePS — ps_6_6
+    add_custom_command(
+        OUTPUT  "${SHADER_OUTPUT_DIR}/DebugLinePS.cso"
+        COMMAND "${DXC_EXECUTABLE}" -T ps_6_6 -E main
+                -Fo "${SHADER_OUTPUT_DIR}/DebugLinePS.cso"
+                "${SHADER_SOURCE_DIR}/debug/DebugLinePS.hlsl"
+        DEPENDS "${SHADER_SOURCE_DIR}/debug/DebugLinePS.hlsl"
+        COMMENT "Compiling DebugLinePS.hlsl -> DebugLinePS.cso"
         VERBATIM
     )
 
     add_custom_target(engine_rendering_shaders ALL
         DEPENDS
-            "${SHADER_OUTPUT_DIR}/FlatShadeVS.cso"
-            "${SHADER_OUTPUT_DIR}/FlatShadePS.cso"
+            "${SHADER_OUTPUT_DIR}/OpaqueVS.cso"
+            "${SHADER_OUTPUT_DIR}/OpaquePS.cso"
+            "${SHADER_OUTPUT_DIR}/ShadowVS.cso"
+            "${SHADER_OUTPUT_DIR}/ShadowPS.cso"
+            "${SHADER_OUTPUT_DIR}/DebugLineVS.cso"
+            "${SHADER_OUTPUT_DIR}/DebugLinePS.cso"
     )
     add_dependencies(engine_rendering engine_rendering_shaders)
 else()

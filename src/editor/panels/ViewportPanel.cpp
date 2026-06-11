@@ -7,20 +7,31 @@
 #include "editor/commands/TransformCommand.h"
 
 #include <core/ecs/World.h>
+#include <core/ecs/Name.h>
 #include <core/ecs/PrefabInstance.h>
+#include <core/ecs/View.h>
+#include <core/ecs/HierarchyComponent.h>
 #include <core/components/ColliderComponent.h>
 #include <core/components/Transform.h>
+#include <core/components/SpawnPointComponent.h>
+#include <core/components/TriggerComponent.h>
+#include <rendering/Camera.h>
 #include <core/math/Quat.h>
 #include <physics/PhysicsWorld.h>
 #include <tools/PrefabSerializer.h>
+#include <tools/EassetLoader.h>
+#include <core/components/MeshHandle.h>
 
 #include <imgui.h>
+#include <ImGuizmo.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace engine::editor {
@@ -124,127 +135,116 @@ void ViewportPanel::handleCameraInput(EditorCamera& camera, bool hovered) {
 }
 
 void ViewportPanel::drawGizmo(core::ecs::World& world, core::ecs::Entity selected,
-                              const Mat4& viewProj, UndoStack& undo) {
+                              const Mat4& view, const Mat4& proj, UndoStack& undo) {
+    (void)undo; // reserved for undo command on drag-end
     auto* tr = world.tryGet<core::Transform>(selected);
     if (!tr) return;
 
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 origin;
-    if (!worldToScreen(tr->position, viewProj, originX_, originY_,
-                       contentWidth_, contentHeight_, origin)) {
-        return;
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::SetRect(originX_, originY_, contentWidth_, contentHeight_);
+
+    // Determine whether this entity is a child — gizmo always operates in world space.
+    const auto* hc = world.tryGet<core::ecs::HierarchyComponent>(selected);
+    const bool hasParent = hc && hc->parent != core::ecs::kInvalidEntity;
+
+    // Resolve the world-space TRS used to position the gizmo.
+    core::math::Vec3 worldPos;
+    core::math::Quat worldRot;
+    core::math::Vec3 worldScl;
+    if (hasParent) {
+        const core::Transform wt = core::ecs::computeWorldTransform(world, selected);
+        worldPos = wt.position;
+        worldRot = wt.rotation;
+        worldScl = wt.scale;
+    } else {
+        worldPos = tr->position;
+        worldRot = tr->rotation;
+        worldScl = tr->scale;
     }
 
-    const ImU32 axisColX = IM_COL32(230, 70, 70, 255);
-    const ImU32 axisColY = IM_COL32(70, 220, 70, 255);
-    const ImU32 axisColZ = IM_COL32(80, 120, 240, 255);
+    // Build a column-major TRS matrix from the world-space transform.
+    // ImGuizmo expects column-major float[16] with column-vector convention (v' = M*v).
+    // Engine uses row-major / row-vector convention (v' = v*M), so M_imgui = M_engine^T.
+    // Transpose: put engine element [r][c] into ImGuizmo position [c*4+r] as element [c][r],
+    // i.e. index the engine matrix with swapped indices: rotMat.m[c][r].
+    const core::math::Mat4 rotMat = core::math::toMat4(worldRot);
+    float matrix[16];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            matrix[c * 4 + r] = (r < 3 && c < 3) ? rotMat.m[c][r] :
+                                 (r == 3 && c < 3) ? 0.0f :
+                                 (r < 3 && c == 3) ? (&worldPos.x)[r] :
+                                 (r == 3 && c == 3) ? 1.0f : 0.0f;
+    // Scale columns 0-2 by world scale.
+    matrix[0]  *= worldScl.x; matrix[1]  *= worldScl.x; matrix[2]  *= worldScl.x;
+    matrix[4]  *= worldScl.y; matrix[5]  *= worldScl.y; matrix[6]  *= worldScl.y;
+    matrix[8]  *= worldScl.z; matrix[9]  *= worldScl.z; matrix[10] *= worldScl.z;
 
-    // Draw axis handles scaled in world space so they stay roughly constant size.
-    const float handleLen = 1.0f;
-    ImVec2 endX, endY, endZ;
-    worldToScreen(tr->position + Vec3{handleLen, 0, 0}, viewProj, originX_, originY_, contentWidth_, contentHeight_, endX);
-    worldToScreen(tr->position + Vec3{0, handleLen, 0}, viewProj, originX_, originY_, contentWidth_, contentHeight_, endY);
-    worldToScreen(tr->position + Vec3{0, 0, handleLen}, viewProj, originX_, originY_, contentWidth_, contentHeight_, endZ);
+    // Build column-major view and proj for ImGuizmo (transpose: m[c][r] not m[r][c]).
+    float viewCM[16], projCM[16];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) {
+            viewCM[c*4+r] = view.m[c][r];
+            projCM[c*4+r] = proj.m[c][r];
+        }
 
-    dl->AddLine(origin, endX, axisColX, 2.5f);
-    dl->AddLine(origin, endY, axisColY, 2.5f);
-    dl->AddLine(origin, endZ, axisColZ, 2.5f);
-    dl->AddCircleFilled(origin, 4.0f, IM_COL32(240, 240, 240, 255));
+    // Map our GizmoOp enum to ImGuizmo operation.
+    ImGuizmo::OPERATION op = ImGuizmo::TRANSLATE;
+    if (gizmoOp_ == GizmoOp::Rotate) op = ImGuizmo::ROTATE;
+    else if (gizmoOp_ == GizmoOp::Scale) op = ImGuizmo::SCALE;
 
     if (gizmoOp_ == GizmoOp::None) return;
 
-    // Begin a drag with left mouse over the gizmo center; apply along screen axes.
-    ImGuiIO& io = ImGui::GetIO();
-    const bool overGizmo = (std::fabs(io.MousePos.x - origin.x) < 14.0f &&
-                            std::fabs(io.MousePos.y - origin.y) < 14.0f);
-
-    if (!dragging_ && overGizmo && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        dragging_  = true;
-        dragStart_ = *tr;
+    const bool snap = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    float snapValues[3] = { snapTranslate_, snapTranslate_, snapTranslate_ };
+    if (gizmoOp_ == GizmoOp::Scale) {
+        snapValues[0] = snapScale_; snapValues[1] = snapScale_; snapValues[2] = snapScale_;
     }
 
-    if (dragging_) {
-        const float dx = io.MouseDelta.x;
-        const float dy = io.MouseDelta.y;
-        const bool snap = snapEnabled_ || io.KeyCtrl;
+    const bool wasUsing = ImGuizmo::IsUsing();
+    ImGuizmo::Manipulate(viewCM, projCM, op, ImGuizmo::WORLD, matrix,
+                         nullptr, snap ? snapValues : nullptr);
 
-        switch (gizmoOp_) {
-            case GizmoOp::Translate: {
-                // Snap-to-surface: when Shift is held and a PhysicsWorld is
-                // available, raycast from the cursor into the scene and place
-                // the entity at the hit point, aligning Y to the surface normal.
-                if (io.KeyShift && physicsWorld_) {
-                    bool invOk = false;
-                    const Mat4 invVP = core::math::inverse(viewProj, &invOk);
-                    if (invOk) {
-                        Vec3 rayOrigin, rayDir;
-                        SelectionSystem::rayFromPixel(
-                            io.MousePos.x - originX_,
-                            io.MousePos.y - originY_,
-                            contentWidth_, contentHeight_,
-                            invVP, rayOrigin, rayDir);
+    if (ImGuizmo::IsUsing()) {
+        dragging_ = true;
 
-                        engine::physics::QueryFilter filter{};
-                        const engine::physics::RaycastHit hit =
-                            physicsWorld_->raycast(rayOrigin, rayDir, 1000.0f, filter);
+        // Decompose column-major result back to world-space TRS.
+        float translation[3], rotation[3], scale[3];
+        ImGuizmo::DecomposeMatrixToComponents(matrix, translation, rotation, scale);
 
-                        if (hit.hasHit) {
-                            tr->position = hit.point;
+        const core::math::Vec3 newWorldPos{ translation[0], translation[1], translation[2] };
+        const core::math::Vec3 newWorldScl{ scale[0], scale[1], scale[2] };
+        constexpr float kDeg2Rad = 3.14159265358979f / 180.0f;
+        const core::math::Quat newWorldRot = core::math::fromEulerYxz(
+            rotation[1] * kDeg2Rad,
+            rotation[0] * kDeg2Rad,
+            rotation[2] * kDeg2Rad);
 
-                            // Align entity up direction to the surface normal using
-                            // the shortest rotation from world-up {0,1,0}.
-                            const Vec3 worldUp = Vec3{0.f, 1.f, 0.f};
-                            const Vec3 n       = core::math::normalize(hit.normal);
-                            const float cosA   = core::math::dot(worldUp, n);
-
-                            // Guard near-180° flip (surface pointing straight down).
-                            if (cosA > -0.9999f) {
-                                const Vec3 axis = (cosA > 0.9999f)
-                                    ? Vec3{1.f, 0.f, 0.f}   // identity case
-                                    : core::math::normalize(core::math::cross(worldUp, n));
-                                const float angle = std::acos(
-                                    cosA < -1.0f ? -1.0f : (cosA > 1.0f ? 1.0f : cosA));
-                                tr->rotation = core::math::fromAxisAngle(axis, angle);
-                            }
-                        }
-                    }
-                } else {
-                    // Map screen drag to world XZ plane plus vertical on Y.
-                    const float worldPerPixel = 0.01f;
-                    tr->position.x += dx * worldPerPixel;
-                    tr->position.y -= dy * worldPerPixel;
-                    if (snap) {
-                        tr->position.x = snapTo(tr->position.x, snapTranslate_);
-                        tr->position.y = snapTo(tr->position.y, snapTranslate_);
-                        tr->position.z = snapTo(tr->position.z, snapTranslate_);
-                    }
-                }
-                break;
-            }
-            case GizmoOp::Rotate: {
-                const float angle = dx * 0.01f;
-                core::math::Quat delta = core::math::fromAxisAngle(Vec3{0, 1, 0}, angle);
-                tr->rotation = core::math::normalize(delta * tr->rotation);
-                break;
-            }
-            case GizmoOp::Scale: {
-                const float factor = 1.0f + dx * 0.005f;
-                tr->scale = tr->scale * factor;
-                if (snap) {
-                    tr->scale.x = snapTo(tr->scale.x, snapScale_);
-                    tr->scale.y = snapTo(tr->scale.y, snapScale_);
-                    tr->scale.z = snapTo(tr->scale.z, snapScale_);
-                }
-                break;
-            }
-            case GizmoOp::None: break;
+        if (hasParent) {
+            // Convert world TRS back to parent-relative local TRS.
+            const core::Transform pw = core::ecs::computeWorldTransform(world, hc->parent);
+            const core::math::Quat parentInvRot = core::math::conjugate(pw.rotation);
+            const core::math::Vec3 diff = newWorldPos - pw.position;
+            const core::math::Vec3 unscaled = core::math::rotate(parentInvRot, diff);
+            tr->position = { unscaled.x / pw.scale.x,
+                             unscaled.y / pw.scale.y,
+                             unscaled.z / pw.scale.z };
+            tr->rotation = parentInvRot * newWorldRot;
+            tr->scale    = { newWorldScl.x / pw.scale.x,
+                             newWorldScl.y / pw.scale.y,
+                             newWorldScl.z / pw.scale.z };
+        } else {
+            tr->position = newWorldPos;
+            tr->scale    = newWorldScl;
+            tr->rotation = newWorldRot;
         }
+    }
 
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            dragging_ = false;
-            // Record the whole drag as one undoable command.
-            undo.push(std::make_unique<TransformCommand>(world, selected, dragStart_, *tr));
-        }
+    // Clear drag flag on mouse release.
+    if (wasUsing && !ImGuizmo::IsUsing()) {
+        dragging_ = false;
+        // TODO Phase 10: capture pre-drag transform for undo command
     }
 }
 
@@ -293,9 +293,12 @@ void ViewportPanel::drawOverlays(core::ecs::World& world, const Mat4& viewProj) 
     }
 
     if (overlays_.colliders) {
+        // Collision geometry cache: loaded once per unique asset path.
+        static std::unordered_map<std::string,
+                                   std::optional<tools::CpuCollision>> collCache;
         world.forEachEntity([&](core::ecs::Entity e) {
             auto* col = world.tryGet<core::ColliderComponent>(e);
-            if (!col) return;
+            if (!col || !col->enabled) return;
             auto* tr  = world.tryGet<core::Transform>(e);
             const Vec3 origin = tr ? tr->position : Vec3{0.f, 0.f, 0.f};
             const Vec3 off    = { col->offsetX + origin.x,
@@ -369,8 +372,164 @@ void ViewportPanel::drawOverlays(core::ecs::World& world, const Mat4& viewProj) 
                     }
                     break;
                 }
+                case core::ColliderComponent::Shape::ConvexHull:
+                case core::ColliderComponent::Shape::TriangleMesh: {
+                    auto* mh = world.tryGet<core::MeshHandle>(e);
+                    if (!mh || !mh->assetPath[0]) break;
+
+                    // Per-path cache — loaded once, retained until the process exits.
+                    const std::string key(mh->assetPath);
+                    if (!collCache.count(key)) {
+                        auto loaded = tools::loadEasset(std::filesystem::path(mh->assetPath));
+                        collCache[key] = (loaded && loaded->collision.has_value())
+                            ? std::move(loaded->collision) : std::nullopt;
+                    }
+                    const auto& maybeCol = collCache.at(key);
+                    if (!maybeCol.has_value()) break;
+
+                    const auto& cdata = *maybeCol;
+                    const auto& verts = cdata.vertices;
+                    if (verts.empty()) break;
+
+                    if (col->shape == core::ColliderComponent::Shape::TriangleMesh) {
+                        // Draw triangle soup wireframe; cap at 2000 edges total.
+                        const auto& idx = cdata.indices;
+                        const uint32_t triCount = static_cast<uint32_t>(idx.size() / 3);
+                        constexpr uint32_t kMaxEdges = 2000;
+                        uint32_t edgeCount = 0;
+                        for (uint32_t t = 0; t < triCount && edgeCount < kMaxEdges; ++t) {
+                            const auto& v0 = verts[idx[t*3+0]];
+                            const auto& v1 = verts[idx[t*3+1]];
+                            const auto& v2 = verts[idx[t*3+2]];
+                            const Vec3 p0 = off + Vec3{v0[0], v0[1], v0[2]};
+                            const Vec3 p1 = off + Vec3{v1[0], v1[1], v1[2]};
+                            const Vec3 p2 = off + Vec3{v2[0], v2[1], v2[2]};
+                            drawClippedLine(dl, p0, p1, viewProj, originX_, originY_,
+                                            contentWidth_, contentHeight_, col32);
+                            drawClippedLine(dl, p1, p2, viewProj, originX_, originY_,
+                                            contentWidth_, contentHeight_, col32);
+                            drawClippedLine(dl, p2, p0, viewProj, originX_, originY_,
+                                            contentWidth_, contentHeight_, col32);
+                            edgeCount += 3;
+                        }
+                        if (edgeCount >= kMaxEdges) {
+                            ImVec2 labelPos;
+                            if (worldToScreen(off, viewProj, originX_, originY_,
+                                              contentWidth_, contentHeight_, labelPos)) {
+                                dl->AddText(labelPos, col32, "[truncated]");
+                            }
+                        }
+                    } else {
+                        // ConvexHull — vertex soup, no index list.
+                        // Draw all-pairs edges, capped at 200 to keep the overlay readable.
+                        constexpr uint32_t kMaxHullEdges = 200;
+                        uint32_t edgeCount = 0;
+                        const uint32_t n = static_cast<uint32_t>(verts.size());
+                        for (uint32_t i = 0; i < n && edgeCount < kMaxHullEdges; ++i) {
+                            for (uint32_t j = i + 1; j < n && edgeCount < kMaxHullEdges; ++j) {
+                                const Vec3 p0 = off + Vec3{verts[i][0], verts[i][1], verts[i][2]};
+                                const Vec3 p1 = off + Vec3{verts[j][0], verts[j][1], verts[j][2]};
+                                drawClippedLine(dl, p0, p1, viewProj, originX_, originY_,
+                                                contentWidth_, contentHeight_, col32);
+                                ++edgeCount;
+                            }
+                        }
+                    }
+                    break;
+                }
             }
         });
+    }
+
+    // Camera entity icons — one icon per entity with Transform + rendering::Camera.
+    if (overlays_.cameras) {
+        core::ecs::View<core::Transform, rendering::Camera> camView(world);
+        for (auto [entity, tr, cam] : camView) {
+            ImVec2 screenPos;
+            if (!worldToScreen(tr.position, viewProj,
+                               originX_, originY_, contentWidth_, contentHeight_,
+                               screenPos)) {
+                continue;
+            }
+            // Clip to viewport bounds with a small margin so edge icons remain visible.
+            if (screenPos.x < originX_ - 8.0f || screenPos.x > originX_ + contentWidth_  + 8.0f) continue;
+            if (screenPos.y < originY_ - 8.0f || screenPos.y > originY_ + contentHeight_ + 8.0f) continue;
+
+            const ImU32 col     = cam.isMain ? IM_COL32(255, 220,  60, 230)   // gold for main cam
+                                             : IM_COL32(180, 180, 255, 200);  // pale blue for others
+            const float radius  = 8.0f;
+            dl->AddCircle(screenPos, radius, col, 0, 2.0f);
+            // Small lens rectangle in front of the circle.
+            dl->AddRect(ImVec2(screenPos.x - 5.0f, screenPos.y - 3.0f),
+                        ImVec2(screenPos.x + 5.0f, screenPos.y + 3.0f),
+                        col, 0.0f, 0, 1.5f);
+            // Label.
+            dl->AddText(ImVec2(screenPos.x + radius + 2.0f, screenPos.y - 6.0f),
+                        col, cam.isMain ? "CAM [main]" : "CAM");
+        }
+    }
+
+    // SpawnPoint entity icons.
+    if (overlays_.spawnPoints) {
+        core::ecs::View<core::Transform, core::SpawnPointComponent> spawnView(world);
+        for (auto [entity, tr, sp] : spawnView) {
+            ImVec2 screenPos;
+            if (!worldToScreen(tr.position, viewProj,
+                               originX_, originY_, contentWidth_, contentHeight_,
+                               screenPos)) continue;
+            if (screenPos.x < originX_ - 8.0f || screenPos.x > originX_ + contentWidth_  + 8.0f) continue;
+            if (screenPos.y < originY_ - 8.0f || screenPos.y > originY_ + contentHeight_ + 8.0f) continue;
+
+            const ImU32 col = sp.teamId == 0
+                ? IM_COL32(80, 220, 80, 230)    // green = any team
+                : IM_COL32(80, 180, 255, 230);  // blue = specific team
+            dl->AddCircle(screenPos, 9.0f, col, 0, 2.0f);
+            // Arrow pointing up to indicate "spawn here".
+            dl->AddLine(screenPos, ImVec2(screenPos.x, screenPos.y - 14.0f), col, 2.0f);
+            dl->AddLine(ImVec2(screenPos.x, screenPos.y - 14.0f),
+                        ImVec2(screenPos.x - 4.0f, screenPos.y - 10.0f), col, 2.0f);
+            dl->AddLine(ImVec2(screenPos.x, screenPos.y - 14.0f),
+                        ImVec2(screenPos.x + 4.0f, screenPos.y - 10.0f), col, 2.0f);
+            char lbl[32];
+            std::snprintf(lbl, sizeof(lbl), sp.teamId ? "SPAWN[T%u]" : "SPAWN", sp.teamId);
+            dl->AddText(ImVec2(screenPos.x + 11.0f, screenPos.y - 6.0f), col, lbl);
+        }
+    }
+
+    // Trigger volume gizmos.
+    if (overlays_.triggers) {
+        core::ecs::View<core::Transform, core::TriggerComponent> trigView(world);
+        const ImU32 col = IM_COL32(40, 220, 60, 200);
+        for (auto [entity, tr, trig] : trigView) {
+            ImVec2 screenPos;
+            if (!worldToScreen(tr.position, viewProj,
+                               originX_, originY_, contentWidth_, contentHeight_,
+                               screenPos)) continue;
+            if (screenPos.x < originX_ - 8.0f || screenPos.x > originX_ + contentWidth_  + 8.0f) continue;
+            if (screenPos.y < originY_ - 8.0f || screenPos.y > originY_ + contentHeight_ + 8.0f) continue;
+
+            if (trig.shape == core::ColliderComponent::Shape::Sphere) {
+                const float r = trig.params.sphere.radius;
+                // Project radius to screen: use a point offset by r on X axis.
+                ImVec2 edgePt;
+                const bool ok = worldToScreen(
+                    {tr.position.x + r, tr.position.y, tr.position.z},
+                    viewProj, originX_, originY_, contentWidth_, contentHeight_, edgePt);
+                const float screenR = ok
+                    ? std::abs(edgePt.x - screenPos.x)
+                    : 12.0f;
+                dl->AddCircle(screenPos, screenR, col, 0, 1.5f);
+            } else {
+                // Box: project the 4 visible corners (approximate 2D AABB).
+                const auto& b = trig.params.box;
+                float hw = b.halfX, hh = b.halfY;
+                dl->AddRect(
+                    ImVec2(screenPos.x - hw * 20.0f, screenPos.y - hh * 20.0f),
+                    ImVec2(screenPos.x + hw * 20.0f, screenPos.y + hh * 20.0f),
+                    col, 0.0f, 0, 1.5f);
+            }
+            dl->AddText(ImVec2(screenPos.x + 13.0f, screenPos.y - 6.0f), col, "TRIGGER");
+        }
     }
 }
 
@@ -531,6 +690,31 @@ void ViewportPanel::handlePrefabDrop(const std::filesystem::path& path,
     // TODO Phase 9: push a SpawnPrefabCommand onto the undo stack.
 }
 
+void ViewportPanel::handleEassetDrop(const std::filesystem::path& path,
+                                     core::ecs::World& world,
+                                     core::ecs::Entity& selected,
+                                     const EditorCamera& camera) {
+    core::ecs::Entity e = world.createEntity();
+
+    // Name it after the file stem.
+    world.addComponent<core::ecs::Name>(e, core::ecs::Name(path.stem().string().c_str()));
+
+    // Place it at the camera's current focus point so the user can orbit to
+    // wherever they want geometry before dropping.
+    core::Transform tr{};
+    tr.position = camera.focus();
+    world.addComponent<core::Transform>(e, tr);
+
+    // Wire the asset path so MeshRenderSystem picks it up next frame.
+    core::MeshHandle mh{};
+    const std::string pathStr = path.string();
+    strncpy_s(mh.assetPath, sizeof(mh.assetPath), pathStr.c_str(), _TRUNCATE);
+    world.addComponent<core::MeshHandle>(e, mh);
+
+    selected = e;
+    if (sceneDirty_) *sceneDirty_ = true;
+}
+
 void ViewportPanel::drawOrientationWidget(const core::math::Mat4& view) {
     constexpr float kSize   = 80.0f;
     constexpr float kMargin = 12.0f;
@@ -588,8 +772,11 @@ void ViewportPanel::draw(core::ecs::World& world,
                          SelectionSystem& picking,
                          UndoStack& undo,
                          uint64_t sceneTextureSrv,
-                         bool* open) {
+                         bool* open,
+                         app::ViewMode& viewMode) {
     if (open && !*open) return;
+
+    ImGuizmo::BeginFrame();
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     const bool visible = ImGui::Begin("Viewport", open);
@@ -600,6 +787,17 @@ void ViewportPanel::draw(core::ecs::World& world,
     }
 
     focused_ = ImGui::IsWindowFocused();
+
+    // Viewmode toolbar — Lit / Unlit dropdown.
+    {
+        const char* viewModeItems[] = { "Lit", "Unlit" };
+        int vmi = static_cast<int>(viewMode);
+        ImGui::SetNextItemWidth(90.0f);
+        if (ImGui::Combo("##viewmode", &vmi, viewModeItems, 2))
+            viewMode = static_cast<app::ViewMode>(vmi);
+        ImGui::SameLine();
+        ImGui::Separator();
+    }
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     contentWidth_  = avail.x > 1.0f ? avail.x : 1.0f;
@@ -632,7 +830,7 @@ void ViewportPanel::draw(core::ecs::World& world,
 
     const bool hovered = ImGui::IsItemHovered();
 
-    // PS3 — accept .prefab drag-drop onto the viewport image.
+    // Accept .prefab and .easset drag-drop onto the viewport image.
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload =
                 ImGui::AcceptDragDropPayload("ASSET_PATH")) {
@@ -640,6 +838,8 @@ void ViewportPanel::draw(core::ecs::World& world,
                 static_cast<const char*>(payload->Data));
             if (droppedPath.extension() == ".prefab") {
                 handlePrefabDrop(droppedPath, world, selected);
+            } else if (droppedPath.extension() == ".easset") {
+                handleEassetDrop(droppedPath, world, selected, camera);
             }
         }
         ImGui::EndDragDropTarget();
@@ -657,6 +857,7 @@ void ViewportPanel::draw(core::ecs::World& world,
     // Left-click in empty space (not dragging gizmo, not orbiting) picks.
     if (hovered && !dragging_ && !colliderDragging_ &&
         !ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
+        !ImGuizmo::IsOver() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         // Rebuild pickables from the world (unit AABB per entity transform).
         std::vector<SelectionSystem::Pickable> picks;
@@ -677,7 +878,7 @@ void ViewportPanel::draw(core::ecs::World& world,
 
     drawOverlays(world, viewProj);
     if (world.isAlive(selected)) {
-        drawGizmo(world, selected, viewProj, undo);
+        drawGizmo(world, selected, view, proj, undo);
         drawColliderHandles(world, selected, viewProj, undo);
     }
     drawOrientationWidget(view);

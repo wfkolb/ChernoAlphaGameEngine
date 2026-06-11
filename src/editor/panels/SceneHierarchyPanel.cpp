@@ -158,25 +158,22 @@ core::ecs::Entity SceneHierarchyPanel::draw(core::ecs::World& world,
     if (!canDelete) ImGui::EndDisabled();
 
     if (entityFactory_ && ImGui::BeginMenu("Spawn")) {
-        if (ImGui::MenuItem("FpsCharacter")) {
-            core::ecs::SpawnParams params{};
-            const core::ecs::Entity spawned =
-                entityFactory_->spawn("FpsCharacter", params, world);
-            if (spawned != core::ecs::kInvalidEntity) {
-                selected = spawned;
-                if (selectionSystem_) selectionSystem_->selectOnly(selected);
-                if (sceneDirty_) *sceneDirty_ = true;
+        // Enumerate registered archetypes dynamically — no hardcoded names.
+        // Game-side editor mains register archetypes before EditorApp::run().
+        for (const std::string& archetypeName : entityFactory_->registeredArchetypeNames()) {
+            if (ImGui::MenuItem(archetypeName.c_str())) {
+                core::ecs::SpawnParams params{};
+                const core::ecs::Entity spawned =
+                    entityFactory_->spawn(archetypeName, params, world);
+                if (spawned != core::ecs::kInvalidEntity) {
+                    selected = spawned;
+                    if (selectionSystem_) selectionSystem_->selectOnly(selected);
+                    if (sceneDirty_) *sceneDirty_ = true;
+                }
             }
         }
-        if (ImGui::MenuItem("SpawnPoint")) {
-            core::ecs::SpawnParams params{};
-            const core::ecs::Entity spawned =
-                entityFactory_->spawn("SpawnPointEntity", params, world);
-            if (spawned != core::ecs::kInvalidEntity) {
-                selected = spawned;
-                if (selectionSystem_) selectionSystem_->selectOnly(selected);
-                if (sceneDirty_) *sceneDirty_ = true;
-            }
+        if (entityFactory_->registeredArchetypeNames().empty()) {
+            ImGui::TextDisabled("(no archetypes registered)");
         }
         ImGui::EndMenu();
     }

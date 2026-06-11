@@ -64,13 +64,17 @@ This document records the binding technology decisions for the Windows 3D game e
 | Library | Purpose | Source |
 |---|---|---|
 | DirectXMath / DirectX-Headers | DX12 helpers, math fallback | vcpkg |
-| DXC (binary redistributable) | HLSL compilation | vendored under `engine/third_party/dxc` (matching Windows SDK version) |
+| DXC (`directx-dxc`) | HLSL compilation | vcpkg (host tool) |
 | WinPixEventRuntime | PIX markers | vcpkg |
-| stb_image, stb_image_write | Texture import | vendored under `engine/third_party/stb` (single-header) |
+| stb | Texture decode (`stb_image.h`) and mip resize (`stb_image_resize2.h`) | vcpkg |
 | meshoptimizer | Mesh import optimization | vcpkg |
+| cgltf | glTF 2.0 parsing (header-only) | vcpkg |
 | Dear ImGui (docking branch) | Editor UI | vcpkg |
+| ImGuizmo | Editor gizmo (translate/rotate/scale overlay) | vcpkg |
 | Google Test 1.14+ | Unit and integration tests | vcpkg |
 | Google Benchmark | Microbenchmarks | vcpkg |
+| toml++ | TOML configuration parsing | vcpkg |
+| lz4 | Data compression | vcpkg |
 
 Anything not on this list requires a written exception approved by the Team Leader before being added to `vcpkg.json`.
 
@@ -107,7 +111,7 @@ GLM is allowed inside `engine/src/tools` (asset importer) for convenience but mu
 - **Google Test 1.14+** for unit and integration tests.
 - **Google Benchmark** for microbenchmarks.
 - One test target per module: `core_tests`, `rendering_tests`, `networking_tests`, `tools_tests`.
-- CI runs Debug and Release on every PR. See `docs/scope-testing.md` for details.
+- CI runs via GitHub Actions (`.github/workflows/ci.yml`), matrix over Debug and Release on `windows-2022`. Unit tests are blocking; integration and GPU tests run on a self-hosted runner with `continue-on-error`. See `docs/scope-testing.md` for details.
 
 ## 10. Versioning and Branching
 
@@ -122,7 +126,6 @@ The following are explicitly **not** part of v1 and must not be designed around:
 - macOS / Linux / console support
 - Vulkan or DX11 fallback
 - Hot-reloadable scripting (Lua, AngelScript, etc.)
-- Editor undo/redo (the editor is a stub in v1)
 - DLSS/FSR/XeSS
 - Ray tracing as a primary path (DXR 1.1 may be probed for future use only)
 
@@ -137,3 +140,4 @@ The following are explicitly **not** part of v1 and must not be designed around:
 | 2026-04-24 | Custom math library, RH/Y-up | Avoids leaking SIMD types; consistent with renderer + serializer. |
 | 2026-04-24 | CMake + vcpkg manifest | Reproducible builds; no checked-in third-party source for libraries vcpkg can supply. |
 | 2026-04-24 | Winsock2 directly | No middleware; UDP + custom reliability layer. |
+| 2026-06-07 | Phase 10 Wave 1 | XInput gamepad, clock abstraction, texture pipeline, skinned mesh stub, CI added. |

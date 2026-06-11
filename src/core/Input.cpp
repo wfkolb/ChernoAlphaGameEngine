@@ -1,7 +1,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <hidusage.h>
+#include <Xinput.h>
+#pragma comment(lib, "Xinput.lib")
 
+#include <algorithm>
 #include <memory>
 
 #include "core/Input.h"
@@ -90,12 +93,61 @@ void InputSystem::processRawInput(void* hRawInput) {
     }
 }
 
+namespace {
+
+// Dead-zone constants matching XINPUT_GAMEPAD thresholds.
+constexpr int kLeftDeadZone     = XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE;   // 7849
+constexpr int kRightDeadZone    = XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE;  // 8689
+constexpr int kTriggerDeadZone  = XINPUT_GAMEPAD_TRIGGER_THRESHOLD;     // 30
+constexpr int kMaxStickValue    = 32767;
+constexpr int kMaxTriggerValue  = 255;
+
+// Apply dead-zone and normalize a raw thumb-stick axis to [-1, 1].
+float normalizeAxis(int raw, int deadZone) {
+    if (raw < -deadZone) raw += deadZone;
+    else if (raw > deadZone) raw -= deadZone;
+    else return 0.0f;
+    const float normalized = static_cast<float>(raw) / static_cast<float>(kMaxStickValue - deadZone);
+    return std::clamp(normalized, -1.0f, 1.0f);
+}
+
+// Apply dead-zone and normalize a raw trigger byte to [0, 1].
+float normalizeTrigger(uint8_t raw) {
+    if (raw <= kTriggerDeadZone) return 0.0f;
+    const float normalized = static_cast<float>(raw - kTriggerDeadZone) /
+                             static_cast<float>(kMaxTriggerValue - kTriggerDeadZone);
+    return std::clamp(normalized, 0.0f, 1.0f);
+}
+
+void pollGamepads(std::array<GamepadState, InputState::kMaxGamepads>& gamepads) {
+    for (int slot = 0; slot < InputState::kMaxGamepads; ++slot) {
+        XINPUT_STATE xs{};
+        const DWORD result = XInputGetState(static_cast<DWORD>(slot), &xs);
+        GamepadState& gs = gamepads[slot];
+        if (result != ERROR_SUCCESS) {
+            gs = {};  // controller disconnected — zero out state
+            continue;
+        }
+        gs.connected    = true;
+        gs.leftStickX   = normalizeAxis(xs.Gamepad.sThumbLX, kLeftDeadZone);
+        gs.leftStickY   = normalizeAxis(xs.Gamepad.sThumbLY, kLeftDeadZone);
+        gs.rightStickX  = normalizeAxis(xs.Gamepad.sThumbRX, kRightDeadZone);
+        gs.rightStickY  = normalizeAxis(xs.Gamepad.sThumbRY, kRightDeadZone);
+        gs.leftTrigger  = normalizeTrigger(xs.Gamepad.bLeftTrigger);
+        gs.rightTrigger = normalizeTrigger(xs.Gamepad.bRightTrigger);
+        gs.buttons      = xs.Gamepad.wButtons;
+    }
+}
+
+} // anonymous namespace
+
 void InputSystem::update() {
     state_.prev_             = state_.curr_;
     state_.mouseDeltaX_      = pendingDeltaX_;
     state_.mouseDeltaY_      = pendingDeltaY_;
     state_.mouseScrollDelta_ = pendingScroll_;
     pendingDeltaX_ = pendingDeltaY_ = pendingScroll_ = 0;
+    pollGamepads(state_.gamepads_);
 }
 
 } // namespace engine::core

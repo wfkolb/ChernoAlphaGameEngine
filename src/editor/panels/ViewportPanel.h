@@ -3,6 +3,7 @@
 
 #include "editor/EditorCamera.h"
 
+#include <app/MeshRenderSystem.h>
 #include <core/ecs/Entity.h>
 #include <core/math/Mat.h>
 #include <core/math/Vec.h>
@@ -24,15 +25,16 @@ class SelectionSystem;
 enum class GizmoOp : uint8_t { None, Translate, Rotate, Scale };
 
 // Renders the scene texture, hosts the editor camera, draws manipulation gizmos
-// (implemented with ImGui draw lists — no ImGuizmo dependency), and toggles
-// debug overlays. The actual scene-to-texture render is done by EditorApp; this
-// panel only consumes the resulting shader-resource handle.
+// (implemented with ImGuizmo), and toggles debug overlays. The actual
+// scene-to-texture render is done by EditorApp; this panel only consumes the
+// resulting shader-resource handle.
 class ViewportPanel {
 public:
     struct Overlays {
         bool grid        = true;
         bool colliders   = false;
         bool boundingBox = true;
+        bool cameras     = true;   // show Camera component entity icons
         bool spawnPoints = false;
         bool triggers    = false;
     };
@@ -45,7 +47,8 @@ public:
               SelectionSystem& picking,
               UndoStack& undo,
               uint64_t sceneTextureSrv,
-              bool* open);
+              bool* open,
+              app::ViewMode& viewMode);
 
     // Viewport content region size in pixels, updated each draw().
     float contentWidth()  const noexcept { return contentWidth_; }
@@ -73,7 +76,8 @@ private:
     void handleCameraInput(EditorCamera& camera, bool hovered);
     void drawGizmo(core::ecs::World& world,
                    core::ecs::Entity selected,
-                   const core::math::Mat4& viewProj,
+                   const core::math::Mat4& view,
+                   const core::math::Mat4& proj,
                    UndoStack& undo);
     void drawColliderHandles(core::ecs::World& world,
                              core::ecs::Entity selected,
@@ -85,6 +89,10 @@ private:
     void handlePrefabDrop(const std::filesystem::path& path,
                           core::ecs::World& world,
                           core::ecs::Entity& selected);
+    void handleEassetDrop(const std::filesystem::path& path,
+                          core::ecs::World& world,
+                          core::ecs::Entity& selected,
+                          const EditorCamera& camera);
 
     Overlays overlays_;
     GizmoOp  gizmoOp_      = GizmoOp::Translate;

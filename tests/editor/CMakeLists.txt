@@ -7,6 +7,7 @@ set(EDITOR_IMPL_SOURCES
     "${CMAKE_SOURCE_DIR}/src/editor/SelectionSystem.cpp"
     "${CMAKE_SOURCE_DIR}/src/editor/commands/EntityCommand.cpp"
     "${CMAKE_SOURCE_DIR}/src/editor/UndoStack.cpp"
+    "${CMAKE_SOURCE_DIR}/src/editor/ComponentEditorRegistry.cpp"
 )
 
 add_executable(editor_tests
@@ -21,6 +22,7 @@ target_compile_definitions(editor_tests PRIVATE ENGINE_DEVREL)
 target_link_libraries(editor_tests PRIVATE
     engine::tools
     engine::core
+    engine::physics
     GTest::gtest_main
 )
 
@@ -32,6 +34,7 @@ target_link_libraries(editor_tests PRIVATE tomlplusplus::tomlplusplus)
 target_include_directories(editor_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/tools/public
     ${CMAKE_SOURCE_DIR}/src/core/public
+    ${CMAKE_SOURCE_DIR}/src/physics/public
     ${CMAKE_SOURCE_DIR}/src
 )
 

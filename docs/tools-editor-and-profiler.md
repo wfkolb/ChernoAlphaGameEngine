@@ -1,6 +1,6 @@
-# Tools: Editor Stub and Profiler
+# Tools: Editor and Profiler
 
-Status: Approved (Phase 2)
+Status: Updated (Phase 10)
 Owner: Tools Lead
 Task: #15
 References: architecture.md §8, ecs-design.md §10, rendering-frame-graph.md §3.3, scope-tools.md
@@ -9,14 +9,19 @@ References: architecture.md §8, ecs-design.md §10, rendering-frame-graph.md §
 
 ## 1. Editor Overview
 
-The editor is a **stub** in v1. It provides:
-- An ImGui-driven window showing the ECS entity list.
-- A component inspector for the selected entity (driven by ECS reflection).
-- A translate gizmo (ImGuizmo) for the `Transform` component.
+The editor is a full-featured scene editor compiled only in DevRel builds. It provides:
 
-It does NOT provide: undo/redo, save/load, play/stop, scene creation, asset browser.
+- **Docking layout** — Hierarchy (left), Viewport (center), Inspector (right), Asset Browser + Console (bottom), Scene Properties panel.
+- **Hierarchy panel** — ECS entity list with name display and selection.
+- **Viewport panel** — 3D viewport with ImGuizmo gizmo for translate, rotate, and scale (W/E/R keys; Ctrl for snap).
+- **Inspector panel** — `ComponentEditorRegistry` drives per-component widgets for all 18 registered components.
+- **Asset Browser panel** — Split view: 65% file list on the left, 35% inline mesh preview on the right (`MeshPreviewPanel::drawInline`). The separate floating "Asset Preview" window was removed.
+- **Console panel** — Live log output.
+- **Play-In-Editor (PIE)** — in-process server+client; see §8.
+- **Undo/redo** — `UndoStack` with 100-command cap.
+- **Scene save/load** and prefab system.
 
-**The editor is DevRel-only.** It is compiled only when `ENGINE_DEVREL` is defined. In Debug and Release builds, all editor code compiles to nothing (guarded by `#ifdef ENGINE_DEVREL`). The editor window never opens in Release.
+**The editor is DevRel-only.** All editor code is guarded by `#ifdef ENGINE_DEVREL`. In Debug and Release builds the guard compiles the editor to nothing. The editor window never opens in Release.
 
 ---
 
@@ -25,7 +30,7 @@ It does NOT provide: undo/redo, save/load, play/stop, scene creation, asset brow
 ### 2.1 Dependencies
 
 - `Dear ImGui` (docking branch) from vcpkg.
-- `ImGuizmo` — vendored under `engine/third_party/imguizmo/` (single-header, two files). Requires Team Leader approval to add; it is pre-approved for v1.
+- `ImGuizmo` — from vcpkg (added in Phase 10 Wave 1, E1).
 
 ### 2.2 ImGui DX12 backend
 
@@ -60,25 +65,26 @@ The Win32 message handler forwards `WM_*` messages to `ImGui_ImplWin32_WndProcHa
 ## 3. Editor Window Layout
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ Engine Editor (DevRel)                                               │
-├──────────────────────────────────────────────────────────────────────┤
-│ [Entity List]           │ [Inspector]                                │
-│                         │                                            │
-│  Entity 0 (Player)  ←──│  Transform                                 │
-│  Entity 1 (Camera)     │    Position: [1.0] [0.0] [5.0]             │
-│  Entity 2 (Light)      │    Rotation: [0.0] [0.0] [0.0]             │
-│  Entity 3 (Mesh)       │    Scale:    [1.0] [1.0] [1.0]             │
-│  ...                   │                                             │
-│                         │  Renderable                                │
-│                         │    Mesh: helmet.easset                    │
-│                         │    Material: pbr_helmet                   │
-│                         │    CastShadow: [x]                        │
-└──────────────────────────────────────────────────────────────────────┘
-                          ↑ gizmo overlay on the 3D viewport
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Engine Editor (DevRel)                                                   │
+├────────────────┬───────────────────────────────────────┬─────────────────┤
+│ [Hierarchy]    │ [Viewport]                            │ [Inspector]     │
+│                │                                       │                 │
+│  Player        │   <3D scene render>                   │  Transform      │
+│  Camera        │                                       │    Position: …  │
+│  Light         │   [ImGuizmo gizmo overlay]            │    Rotation: …  │
+│  Mesh          │   W=translate E=rotate R=scale        │    Scale: …     │
+│  ...           │                                       │                 │
+│                │                                       │  MeshHandle     │
+│                │                                       │    Path: …      │
+│                │                                       │    Material: 0  │
+├────────────────┴────────────────┬──────────────────────┴─────────────────┤
+│ [Asset Browser]                 │ [Console]                              │
+│  list (65%)  │ preview (35%)   │  log output                            │
+└─────────────────────────────────┴────────────────────────────────────────┘
 ```
 
-Panels use ImGui docking. The editor is a floating ImGui window, not a fullscreen UI — the 3D viewport renders normally behind it.
+Panels use ImGui docking. The 3D viewport renders behind the docked UI. The viewport panel hosts the ImGuizmo overlay.
 
 ---
 
@@ -150,31 +156,40 @@ void inspectTransform(void* data, ecs::EditorContext& ctx) {
 }
 ```
 
-### 5.2 Translate gizmo (ImGuizmo)
+### 5.2 Gizmo (ImGuizmo) — translate / rotate / scale
 
-When the selected entity has a `Transform`, draw an ImGuizmo translate gizmo overlaid on the 3D viewport:
+When the selected entity has a `Transform`, `ViewportPanel` draws an ImGuizmo gizmo overlaid on the 3D viewport. Keyboard shortcuts: **W** = translate, **E** = rotate, **R** = scale. Ctrl held during drag enables snap.
 
 ```cpp
 ImGuizmo::SetOrthographic(false);
 ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
 ImGuizmo::SetRect(0, 0, viewportWidth, viewportHeight);
 
-Mat4 worldMat = t.toMatrix();
+// ImGuizmo expects column-major matrices; convert from row-major storage
+Mat4 viewCol  = transpose(viewMatrix);
+Mat4 projCol  = transpose(projMatrix);
+Mat4 worldCol = transpose(t.toMatrix());
+
 if (ImGuizmo::Manipulate(
-        &viewMatrix.m[0][0],
-        &projMatrix.m[0][0],
-        ImGuizmo::TRANSLATE,
+        &viewCol.m[0][0],
+        &projCol.m[0][0],
+        gizmoOperation_,   // TRANSLATE, ROTATE, or SCALE
         ImGuizmo::WORLD,
-        &worldMat.m[0][0])) {
-    Transform updated = Transform::fromMatrix(worldMat);
-    t.position = updated.position;
-    // do NOT modify rotation/scale from gizmo in translate-only mode
+        &worldCol.m[0][0])) {
+    // Decompose result back to row-major Transform
+    Mat4 worldRow = transpose(worldCol);
+    float matData[16]; memcpy(matData, &worldRow.m[0][0], 64);
+    float translation[3], rotation[3], scale[3];
+    ImGuizmo::DecomposeMatrixToComponents(matData, translation, rotation, scale);
+    t.position = { translation[0], translation[1], translation[2] };
+    t.rotation = fromEulerYxz(toRadians(rotation[1]),
+                               toRadians(rotation[0]),
+                               toRadians(rotation[2]));
+    t.scale    = { scale[0], scale[1], scale[2] };
 }
 ```
 
 View and projection matrices are read from the main camera entity's `Camera` component.
-
-Only the translate operation is supported in v1 (no rotate/scale gizmo). `gizmoOperation_` is always `ImGuizmo::TRANSLATE`.
 
 ---
 
@@ -191,12 +206,14 @@ namespace engine::tools {
     };
 }
 
-#ifdef ENGINE_DEVREL
+#if !defined(NDEBUG) || defined(ENGINE_DEVREL)
     #define PROFILE_SCOPE(name) ::engine::tools::ProfilerScope __prof##__LINE__{name}
 #else
     #define PROFILE_SCOPE(name) ((void)0)
 #endif
 ```
+
+`PROFILE_SCOPE` is active in **Debug and DevRel** builds. It is elided only in Release (`NDEBUG` defined and `ENGINE_DEVREL` not defined).
 
 Usage in any module:
 ```cpp
@@ -221,6 +238,8 @@ PIX integration uses `WinPixEventRuntime` (vcpkg). In DevRel builds only:
 #endif
 ```
 
+`PROFILE_GPU_SCOPE` / `PROFILE_GPU_END` are wired in DevRel only (correct — PIX is a DevRel-only dependency).
+
 Usage in the frame graph execute lambdas:
 ```cpp
 [](ID3D12GraphicsCommandList* cmd, const PassResources& res) {
@@ -230,7 +249,7 @@ Usage in the frame graph execute lambdas:
 }
 ```
 
-The `#include <pix3.h>` is inside `rendering/internal/` headers, never in `tools/Profiler.h`. `PROFILE_GPU_SCOPE` and `PROFILE_GPU_END` are macros in `tools/Profiler.h`; the `pix3.h` include happens inside the macro expansion via a platform header guard in the tools internal implementation. Alternatively: wrap PIX in `tools/internal/PixWrapper.h` and include that from rendering internals.
+The `#include <pix3.h>` is isolated in `tools/internal/PixWrapper.h` and included from rendering internals — never directly in `tools/Profiler.h`.
 
 ### 6.3 Tracy integration (optional build flag)
 
@@ -250,16 +269,47 @@ src/tools/
 │   ├── Logger.h
 │   ├── Config.h
 │   ├── Profiler.h        — PROFILE_SCOPE, PROFILE_GPU_SCOPE macros
-│   ├── AssetImporter.h   — offline; not included by runtime
-│   └── editor/
-│       └── Editor.h      — Editor class (DevRel-only; guarded by #ifdef ENGINE_DEVREL)
+│   └── AssetImporter.h   — offline; not included by runtime
+
+src/editor/               — separate static lib (engine_editor), DevRel-only
+├── public/editor/
+│   └── EditorApp.h       — EditorApp class (guarded by #ifdef ENGINE_DEVREL)
+├── panels/
+│   ├── HierarchyPanel.h/.cpp
+│   ├── ViewportPanel.h/.cpp
+│   ├── InspectorPanel.h/.cpp
+│   ├── AssetBrowserPanel.h/.cpp
+│   ├── MeshPreviewPanel.h/.cpp
+│   ├── ConsolePanel.h/.cpp
+│   └── ScenePropertiesPanel.h/.cpp
 └── internal/
-    ├── LoggerImpl.h
-    ├── ConfigImpl.h
-    ├── PixWrapper.h      — pix3.h include + forwarding
-    └── editor/
-        ├── EntityListPanel.h
-        └── InspectorPanel.h
+    ├── PIEController.h/.cpp
+    ├── UndoStack.h/.cpp
+    ├── ComponentEditorRegistry.h/.cpp
+    └── EditorPrefs.h
+
+src/tools/internal/
+├── LoggerImpl.h
+├── ConfigImpl.h
+└── PixWrapper.h      — pix3.h include + forwarding
 ```
 
-`Editor.h` is inside a `#ifdef ENGINE_DEVREL` guard at the header level so it compiles cleanly in Debug and Release without requiring any stub implementation.
+All editor source is inside `#ifdef ENGINE_DEVREL` guards so it compiles cleanly to nothing in Debug and Release.
+
+---
+
+## 8. Play-In-Editor (PIE)
+
+PIE runs the game simulation in-process using a local server+client pair.
+
+**Starting PIE:**
+1. `PIEController::start()` snapshots the current scene state and places the player entity at the nearest `SpawnPointComponent`.
+2. `EditorApp` checks `pieController_.isCapturingMouse()` (governed by `EditorPrefs::pieMouseCapture`, default `true`).
+3. If mouse capture is enabled, `EditorApp` calls `ShowCursor(FALSE)`, `ClipCursor` (to the viewport rect), `SetCapture(hwnd)`, and sets `ImGuiConfigFlags_NoMouse` to prevent ImGui from consuming input.
+
+**Stopping PIE:**
+- Pressing **Escape** stops PIE.
+- `PIEController::stop()` restores the scene snapshot taken at start, discarding any simulation changes.
+- `EditorApp` releases cursor capture: `ClipCursor(nullptr)`, `ReleaseCapture()`, `ShowCursor(TRUE)`, clears `ImGuiConfigFlags_NoMouse`.
+
+**Opt-out:** Set `EditorPrefs::pieMouseCapture = false` (or via `editor.toml`) to disable cursor capture — useful when debugging PIE without losing mouse focus.

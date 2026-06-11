@@ -5,6 +5,7 @@
 namespace engine::app {
 
 class IGame;
+class IGameMode;
 
 struct ApplicationDesc {
     std::wstring windowTitle   = L"Engine";
@@ -12,6 +13,7 @@ struct ApplicationDesc {
     uint32_t     windowHeight  = 720;
     bool         vsync         = true;
     IGame*       game          = nullptr;
+    IGameMode*   gameMode      = nullptr;  // optional; receives trigger/round callbacks
     std::string  startScenePath;
     uint16_t     hostPort      = 0;        // non-zero = start as server on this port
     std::string  connectAddr;              // non-empty = connect as client to "ip:port"

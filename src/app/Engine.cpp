@@ -12,6 +12,8 @@
 #include <core/ecs/HierarchyComponent.h>
 #include <core/ecs/PrefabInstance.h>
 #include <core/ecs/Name.h>
+#include <core/components/SpawnPointComponent.h>
+#include <core/components/TriggerComponent.h>
 #include <core/components/Transform.h>
 #include <core/components/Health.h>
 #include <core/components/Lifetime.h>
@@ -21,6 +23,7 @@
 #include <physics/CharacterController.h>
 #include <networking/NetworkIdentity.h>
 #include <rendering/Camera.h>
+#include <rendering/Light.h>
 
 namespace engine::app {
 
@@ -126,13 +129,37 @@ bool Engine::init(const EngineConfig& cfg) {
         [](void* ptr) { new(ptr) core::ecs::PrefabInstance{}; },
         nullptr, nullptr
     });
-    // ids 14, 15 reserved for SpawnPointComponent (#68) and TriggerComponent (#72).
+    core::ecs::World::registerComponent<core::SpawnPointComponent>({ // id 14
+        "SpawnPointComponent",
+        sizeof(core::SpawnPointComponent),
+        alignof(core::SpawnPointComponent),
+        [](void* ptr) { new(ptr) core::SpawnPointComponent{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<core::TriggerComponent>({  // id 15
+        "TriggerComponent",
+        sizeof(core::TriggerComponent),
+        alignof(core::TriggerComponent),
+        [](void* ptr) { new(ptr) core::TriggerComponent{}; },
+        nullptr, nullptr
+    });
     core::ecs::World::registerComponent<rendering::Camera>({          // id 16
         "Camera",
         sizeof(rendering::Camera),
         alignof(rendering::Camera),
         [](void* ptr) { new(ptr) rendering::Camera{}; },
         nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<rendering::FpsCameraController>({ // id 17
+        "FpsCameraController",
+        sizeof(rendering::FpsCameraController),
+        alignof(rendering::FpsCameraController),
+        [](void* ptr) { new(ptr) rendering::FpsCameraController{}; },
+        nullptr, nullptr
+    });
+    core::ecs::World::registerComponent<rendering::Light>({              // id 18
+        "Light", sizeof(rendering::Light), alignof(rendering::Light),
+        [](void* ptr) { new(ptr) rendering::Light{}; }, nullptr, nullptr
     });
     world_    = std::make_unique<core::ecs::World>();
     eventBus_ = std::make_unique<core::EventBus>();

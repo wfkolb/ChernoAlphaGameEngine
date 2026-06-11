@@ -141,28 +141,32 @@ Allowed link edges (module-structure.md §2.1) are the only `target_link_librari
 ```json
 {
   "name": "engine",
-  "version": "0.1.0",
+  "version-string": "0.1.0",
   "dependencies": [
     "directx-headers",
-    "directxtk12",
-    "winpixeventruntime",
     "meshoptimizer",
-    "imgui",
+    "cgltf",
+    { "name": "directx-dxc", "host": true },
+    {
+      "name": "imgui",
+      "features": ["dx12-binding", "win32-binding", "docking-experimental"]
+    },
     "gtest",
     "benchmark",
-    "tomlplusplus"
-  ],
-  "overrides": [],
-  "builtin-baseline": "<current vcpkg commit hash>"
+    "tomlplusplus",
+    "lz4",
+    "imguizmo",
+    "stb"
+  ]
 }
 ```
 
-`stb` and `dxc` are vendored (not in vcpkg), per architecture.md §5. They live under `engine/third_party/`.
+All dependencies are now sourced from vcpkg. DXC is pulled as a host tool (`directx-dxc`). `stb` provides `stb_image.h` and `stb_image_resize2.h` for texture decode and mip generation. `imguizmo` provides the editor gizmo. `lz4` provides data compression. `cgltf` is a header-only glTF parser. No dependencies are vendored under `engine/third_party/`.
 
 Adding a new dependency requires:
 1. Team Leader approval.
 2. A `vcpkg.json` PR entry.
-3. A comment in `vcpkg.json` listing the purpose.
+3. A comment in the PR description listing the purpose.
 
 `vcpkg` is configured in manifest mode; the toolchain file is `[vcpkg-root]/scripts/buildsystems/vcpkg.cmake`, set via a preset variable `CMAKE_TOOLCHAIN_FILE`.
 
@@ -317,8 +321,14 @@ The runtime loads texture data zero-copy via `core::fs::MemoryMappedFile` and pa
 
 ### 8.5 Versioning
 
+| Version | Sections present | Notes |
+|---|---|---|
+| v1 | VTXB, IDXB | Geometry only |
+| v2 | VTXB, IDXB, COLL | Geometry + collision |
+| v3 | VTXB, IDXB, COLL, TEX... | Geometry + collision + textures (Phase 10 R4) |
+
 - Bump `version` when any section layout changes incompatibly.
-- The runtime checks `version` at load time and refuses to load unknown versions (`LOG_ERROR` + return `Result::Err`).
+- The runtime checks `version` at load time and refuses to load unknown versions (`LOG_ERROR` + return `Result::Err`). v1 and v2 files still load correctly (backward compatible — missing sections are treated as absent).
 - The C++ struct definitions in `tools/AssetWriter.h` are the authoritative spec. The markdown above is documentation only.
 
 ---
@@ -342,38 +352,40 @@ CMake install rules live in the top-level `CMakeLists.txt` under an `install(...
 
 ---
 
-## 10. CI Matrix
+## 10. Texture Cooking Pipeline (Phase 10 R4)
 
-```yaml
-# .github/workflows/build.yml (skeleton)
-jobs:
-  build:
-    strategy:
-      matrix:
-        os: [windows-2022]
-        config: [Debug, Release]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake --preset ${{ matrix.config == 'Debug' && 'debug' || 'release' }} -S engine -B build
-      - name: Build
-        run: cmake --build build --config ${{ matrix.config }}
-      - name: Unit tests
-        run: ctest --test-dir build -C ${{ matrix.config }} -L unit --output-on-failure
-      - name: clang-format check
-        run: python scripts/check_format.py
-      - name: clang-tidy
-        run: cmake --build build --target clang-tidy
-```
+The asset cooker extracts embedded textures from glTF files and packs them into `.easset` v3.
 
-Integration tests (rendering, networking) are gated on a self-hosted GPU runner — they do not run on the github-hosted runner. The Test Lead defines the step; the Tools Lead wires the runner label.
+**Dependencies:** `stb` from vcpkg — provides `stb_image.h` (decode JPEG/PNG) and `stb_image_resize2.h` (mip generation via box filter).
 
-Nightly-only:
-```yaml
-  benchmark:
-    runs-on: [self-hosted, desktop-mid]
-    steps:
-      - run: ctest --test-dir build -C Release -L benchmark --output-on-failure
-      - uses: actions/upload-artifact@v4
-        with: { name: bench-results, path: tests/benchmarks/baselines/ }
+**Mip generation:** 2×2 box-filter average, full mip chain from base resolution down to 1×1. Each mip level stored top-down (largest first), 256-byte aligned per DX12 requirements.
+
+**`.easset` version history:** see §8.5.
+
+**Runtime:** `CpuMesh::textures` is a `vector<CpuTexture>`. Each `CpuTexture` carries mip levels, `dxgiFormat`, `baseWidth`, and `baseHeight`. The vector is empty when no TEX sections are present (v1/v2 files load without textures — backward compatible).
+
+**Limitation:** Only embedded textures (referenced by `buffer_view`) are extracted. External URI references are skipped with a `LOG_WARN`.
+
+---
+
+## 11. CI Pipeline (Phase 10 T1)
+
+GitHub Actions workflow: `.github/workflows/ci.yml`
+
+**Matrix:** Debug × Release on `windows-2022` (GitHub-hosted runner).
+
+**Steps per job:** checkout → vcpkg binary cache restore → configure (`cmake --preset`) → build → `ctest -L unit --output-on-failure`.
+
+**Gate:** Unit tests are blocking — a unit test failure prevents merge.
+
+**Integration and GPU tests:** run on a `self-hosted` runner with `continue-on-error: true` (physical GPU + display required; failure does not block merge).
+
+**ASAN:** `engine_add_asan(target)` function in `cmake/Warnings.cmake` applies `/fsanitize=address` in Debug builds. Opt-in per test target; not applied globally.
+
+```cmake
+# cmake/Warnings.cmake
+function(engine_add_asan target)
+    target_compile_options(${target} PRIVATE $<$<CONFIG:Debug>:/fsanitize=address>)
+    target_link_options(${target}    PRIVATE $<$<CONFIG:Debug>:/fsanitize=address>)
+endfunction()
 ```

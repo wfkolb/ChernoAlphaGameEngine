@@ -35,6 +35,18 @@ struct MouseScrollEvent {
     int32_t delta;  // positive = up, negative = down, units of WHEEL_DELTA
 };
 
+// Gamepad state for a single controller slot.
+struct GamepadState {
+    bool    connected    = false;
+    float   leftStickX   = 0.0f;  // [-1, 1] after dead-zone
+    float   leftStickY   = 0.0f;  // [-1, 1] after dead-zone
+    float   rightStickX  = 0.0f;  // [-1, 1] after dead-zone
+    float   rightStickY  = 0.0f;  // [-1, 1] after dead-zone
+    float   leftTrigger  = 0.0f;  // [0, 1] after dead-zone
+    float   rightTrigger = 0.0f;  // [0, 1] after dead-zone
+    uint16_t buttons     = 0;     // XINPUT_GAMEPAD button bitmask
+};
+
 // Snapshot of current frame's input. Read-only for game systems.
 // Updated by InputSystem::update() before game logic runs.
 class InputState {
@@ -47,6 +59,10 @@ public:
     int32_t mouseDeltaY() const { return mouseDeltaY_; }
     int32_t mouseScrollDelta() const { return mouseScrollDelta_; }
 
+    // Gamepad state for controller slots 0-3.
+    static constexpr int kMaxGamepads = 4;
+    const GamepadState& gamepad(int slot) const { return gamepads_[slot]; }
+
 private:
     friend class InputSystem;
     static constexpr int kKeyCount = 256;
@@ -55,6 +71,7 @@ private:
     int32_t mouseDeltaX_      = 0;
     int32_t mouseDeltaY_      = 0;
     int32_t mouseScrollDelta_ = 0;
+    std::array<GamepadState, kMaxGamepads> gamepads_ = {};
 };
 
 // Processes Win32 WM_INPUT messages and maintains InputState.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <core/ecs/Entity.h>
 
 namespace engine::rendering {
 
@@ -10,6 +11,8 @@ namespace engine::rendering {
     // range: effective radius in metres (point/spot only).
     // innerConeAngle / outerConeAngle: spot lights only, in radians.
     struct Light {
+        static constexpr engine::core::ecs::ComponentTypeId kComponentId = 18;
+
         enum class Type : uint8_t {
             Directional = 0,
             Point       = 1,

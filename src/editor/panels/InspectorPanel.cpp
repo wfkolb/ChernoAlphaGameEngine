@@ -17,25 +17,19 @@
 #include <core/components/ColliderComponent.h>
 #include <core/components/AnimationState.h>
 #include <core/components/MeshHandle.h>
+#include <core/components/SpawnPointComponent.h>
+#include <core/components/TriggerComponent.h>
+#include <core/input/InputReceiverComponent.h>
+#include <physics/RigidBody.h>
+#include <physics/CharacterController.h>
+#include <rendering/Camera.h>
+#include <rendering/Light.h>
 #include <core/log.h>
 #include <tools/PrefabSerializer.h>
 
 #include <imgui.h>
 
 namespace engine::editor {
-
-void ComponentEditorRegistry::registerWidget(core::ecs::ComponentTypeId id, Widget widget) {
-    widgets_[id] = std::move(widget);
-}
-
-const ComponentEditorRegistry::Widget* ComponentEditorRegistry::find(
-    core::ecs::ComponentTypeId id) const {
-    return widgets_[id] ? &widgets_[id] : nullptr;
-}
-
-bool ComponentEditorRegistry::hasWidget(core::ecs::ComponentTypeId id) const noexcept {
-    return static_cast<bool>(widgets_[id]);
-}
 
 namespace {
 // Add-component helpers for the well-known component set. Generic add-by-id is
@@ -102,6 +96,14 @@ void InspectorPanel::drawAddComponentMenu(core::ecs::World& world, core::ecs::En
         addMenuItem<core::AnimationState>(world, e, "AnimationState");
         addMenuItem<core::MeshHandle>(world, e, "MeshHandle");
         addMenuItem<core::ecs::HierarchyComponent>(world, e, "HierarchyComponent");
+        addMenuItem<core::input::InputReceiverComponent>(world, e, "InputReceiver");
+        addMenuItem<physics::RigidBody>(world, e, "RigidBody");
+        addMenuItem<physics::CharacterController>(world, e, "CharacterController");
+        addMenuItem<core::SpawnPointComponent>(world, e, "SpawnPoint");
+        addMenuItem<core::TriggerComponent>(world, e, "TriggerVolume");
+        addMenuItem<rendering::Camera>(world, e, "Camera");
+        addMenuItem<rendering::Light>(world, e, "Light");
+        addMenuItem<rendering::FpsCameraController>(world, e, "FpsCameraController");
         ImGui::EndPopup();
     }
 }
@@ -163,7 +165,8 @@ void InspectorPanel::draw(core::ecs::World& world, core::ecs::Entity selected, b
                     IM_COL32(50, 130, 255, 255), 2.0f);
             }
 
-            const bool openHeader = ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen);
+            const bool openHeader = ImGui::CollapsingHeader(header,
+                ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
 
             // Name (id 0) and Transform (id 1) are core; don't offer removal.
             if (typeId != core::ecs::Name::kComponentId &&
@@ -214,6 +217,22 @@ void InspectorPanel::draw(core::ecs::World& world, core::ecs::Entity selected, b
                 world.removeComponent<core::MeshHandle>(selected);        break;
             case core::ecs::HierarchyComponent::kComponentId:
                 world.removeComponent<core::ecs::HierarchyComponent>(selected); break;
+            case core::input::InputReceiverComponent::kComponentId:
+                world.removeComponent<core::input::InputReceiverComponent>(selected); break;
+            case physics::RigidBody::kComponentId:
+                world.removeComponent<physics::RigidBody>(selected);     break;
+            case physics::CharacterController::kComponentId:
+                world.removeComponent<physics::CharacterController>(selected); break;
+            case core::SpawnPointComponent::kComponentId:
+                world.removeComponent<core::SpawnPointComponent>(selected); break;
+            case core::TriggerComponent::kComponentId:
+                world.removeComponent<core::TriggerComponent>(selected);  break;
+            case rendering::Camera::kComponentId:
+                world.removeComponent<rendering::Camera>(selected);         break;
+            case rendering::Light::kComponentId:
+                world.removeComponent<rendering::Light>(selected);         break;
+            case rendering::FpsCameraController::kComponentId:
+                world.removeComponent<rendering::FpsCameraController>(selected); break;
             default: break;
         }
     }

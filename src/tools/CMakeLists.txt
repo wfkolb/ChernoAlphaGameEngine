@@ -36,6 +36,9 @@ target_link_libraries(engine_tools PRIVATE meshoptimizer::meshoptimizer)
 find_path(CGLTF_INCLUDE_DIRS "cgltf.h" REQUIRED)
 target_include_directories(engine_tools PRIVATE ${CGLTF_INCLUDE_DIRS})
 
+find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
+target_include_directories(engine_tools PRIVATE ${STB_INCLUDE_DIRS})
+
 # ---------------------------------------------------------------------------
 # Offline asset cooker executable (Task #33)
 # ---------------------------------------------------------------------------

@@ -9,24 +9,9 @@
 
 namespace engine::editor::FileDialog {
 
-std::filesystem::path openFile(const wchar_t* filter, const wchar_t* title) {
-    wchar_t buf[MAX_PATH] = {};
-
-    OPENFILENAMEW ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile   = buf;
-    ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrTitle  = title;
-    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-
-    if (!GetOpenFileNameW(&ofn)) return {};
-    return std::filesystem::path(buf);
-}
-
-std::filesystem::path saveFile(const wchar_t* filter,
-                               const wchar_t* defaultExt,
-                               const wchar_t* title) {
+std::filesystem::path openFile(const wchar_t* filter,
+                               const wchar_t* title,
+                               const wchar_t* initialDir) {
     wchar_t buf[MAX_PATH] = {};
 
     OPENFILENAMEW ofn = {};
@@ -34,9 +19,29 @@ std::filesystem::path saveFile(const wchar_t* filter,
     ofn.lpstrFilter    = filter;
     ofn.lpstrFile      = buf;
     ofn.nMaxFile       = MAX_PATH;
-    ofn.lpstrDefExt    = defaultExt;
     ofn.lpstrTitle     = title;
-    ofn.Flags          = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    ofn.lpstrInitialDir = initialDir;
+    ofn.Flags          = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (!GetOpenFileNameW(&ofn)) return {};
+    return std::filesystem::path(buf);
+}
+
+std::filesystem::path saveFile(const wchar_t* filter,
+                               const wchar_t* defaultExt,
+                               const wchar_t* title,
+                               const wchar_t* initialDir) {
+    wchar_t buf[MAX_PATH] = {};
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize     = sizeof(ofn);
+    ofn.lpstrFilter     = filter;
+    ofn.lpstrFile       = buf;
+    ofn.nMaxFile        = MAX_PATH;
+    ofn.lpstrDefExt     = defaultExt;
+    ofn.lpstrTitle      = title;
+    ofn.lpstrInitialDir = initialDir;
+    ofn.Flags           = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
 
     if (!GetSaveFileNameW(&ofn)) return {};
     return std::filesystem::path(buf);

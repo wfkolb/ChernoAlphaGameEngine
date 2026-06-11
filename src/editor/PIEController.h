@@ -2,6 +2,7 @@
 #ifdef ENGINE_DEVREL
 
 #include <core/ecs/Entity.h>
+#include <core/math/Vec.h>
 
 #include <cstdint>
 #include <vector>
@@ -26,8 +27,11 @@ public:
     enum class State { Stopped, Playing, Paused };
 
     // Begin play. Captures a restore snapshot of `scene`'s world. No-op if
-    // already playing.
-    void start(core::scene::Scene& scene);
+    // already playing. fallbackPos is used when no SpawnPoint entity exists —
+    // typically pass the editor camera position so the player starts where the
+    // author was looking rather than at the world origin.
+    void start(core::scene::Scene& scene,
+               core::math::Vec3 fallbackPos = core::math::Vec3{0.0f, 1.5f, 5.0f});
 
     // Advance the play simulation by dt (fixed 64 Hz steps internally).
     void tick(float dt);

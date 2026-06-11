@@ -15,6 +15,15 @@ public:
     static bool        getBool  (std::string_view section, std::string_view key, bool              defaultVal);
     static std::string getString(std::string_view section, std::string_view key, std::string_view  defaultVal);
 
+    // ---------------------------------------------------------------------------
+    // Typed convenience getters — read from [section].key with sensible defaults.
+    // ---------------------------------------------------------------------------
+
+    /// Blend ratio for CSM cascade split distances: 1.0 = pure logarithmic,
+    /// 0.0 = pure uniform.  Read from [render].shadow_split_lambda in engine.toml.
+    /// Clamped to [0, 1]; default 0.95.
+    static float getRenderShadowSplitLambda();
+
 private:
     Config() = delete;
 };

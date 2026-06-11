@@ -11,11 +11,11 @@ namespace engine::networking {
     inline constexpr uint32_t kProtocolVersion    = 1u;
     inline constexpr uint16_t kMaxConnections     = 16u;
     inline constexpr uint32_t kMaxFragmentPayload = 1190u;  // 1200-byte MTU floor - 10-byte header
-    inline constexpr uint32_t kDefaultTickRate    = 30u;    // Hz
+    inline constexpr uint32_t kDefaultTickRate    = 64u;    // Hz — server simulation tick rate
     inline constexpr uint32_t kTimeoutMs          = 5000u;
     inline constexpr uint32_t kKeepAliveMs        = 1000u;
-    inline constexpr uint32_t kRewindWindowTicks  = 6u;
-    inline constexpr uint32_t kMaxRewindTicks     = 6u;
+    inline constexpr uint32_t kRewindWindowTicks  = 13u;   // 13 ticks @ 64 Hz ≈ 200 ms rewind window
+    inline constexpr uint32_t kMaxRewindTicks     = 13u;   // hard cap matches rewind window
 
     // Per reliable-channel resend policy.
     inline constexpr uint32_t kResendTimeoutMs    = 100u;

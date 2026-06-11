@@ -98,4 +98,12 @@ std::string Config::getString(std::string_view section, std::string_view key,
     return lookupValue<std::string>(section, key, std::string(defaultVal));
 }
 
+float Config::getRenderShadowSplitLambda()
+{
+    float v = getFloat("render", "shadow_split_lambda", 0.95f);
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return v;
+}
+
 } // namespace engine::tools

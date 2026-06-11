@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <vector>
 #include <rendering/MeshManager.h>
+#include <core/math/Mat.h>
 
 namespace engine::rendering {
 
@@ -12,6 +13,10 @@ struct MeshEntry {
     D3D12_VERTEX_BUFFER_VIEW vbv;
     D3D12_INDEX_BUFFER_VIEW  ibv;
     uint32_t indexCount;
+
+    // Skinned mesh fields — populated by uploadSkinned(), empty for static meshes.
+    bool                              isSkinned = false;
+    std::vector<core::math::Mat4>     bindPose;
 };
 
 struct MeshManager::Impl {

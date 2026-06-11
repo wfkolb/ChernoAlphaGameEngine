@@ -4,10 +4,13 @@
 #include <physics/RigidBody.h>
 #include <physics/CharacterController.h>
 #include <physics/QueryFilter.h>
+#include <physics/TriggerEvents.h>
 #include <core/components/Transform.h>
 #include <core/ecs/Entity.h>
 #include <core/math/Vec.h>
 #include <memory>
+
+namespace engine::core { class EventBus; }
 
 namespace engine::physics {
 
@@ -94,6 +97,28 @@ public:
                       const QueryFilter& filter,
                       engine::core::ecs::Entity* outEntities,
                       int maxResults) const;
+
+    // ── Trigger volume management ─────────────────────────────────────────────
+    // Triggers are axis-aligned shapes that detect when dynamic bodies overlap
+    // them. They do NOT participate in collision response.
+    struct TriggerDesc {
+        engine::core::ecs::Entity entity;
+        engine::core::math::Vec3  center;     // world-space center
+        float                     halfX = 0.5f;
+        float                     halfY = 0.5f;
+        float                     halfZ = 0.5f; // for sphere: halfX == radius
+        bool                      isSphere   = false;
+        uint32_t                  teamFilter = 0; // 0 = any team
+        uint32_t                  eventTag   = 0;
+    };
+    void addTrigger   (const TriggerDesc& desc);
+    void removeTrigger(engine::core::ecs::Entity entity);
+    void updateTrigger(engine::core::ecs::Entity entity,
+                       const engine::core::math::Vec3& newCenter);
+
+    // Wire an EventBus to receive TriggerEnterEvent / TriggerExitEvent.
+    // Non-owning pointer — caller must ensure lifetime >= PhysicsWorld.
+    void setEventBus(engine::core::EventBus* bus) noexcept;
 
 private:
     struct Impl;

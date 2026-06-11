@@ -4,6 +4,8 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <cstring>
+#include <string>
+#include <vector>
 
 namespace engine::rendering {
 
@@ -11,6 +13,7 @@ struct MaterialManager::Impl {
     Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
     GpuMaterial*                           mapped = nullptr;
     uint32_t                               count  = 0;
+    std::vector<std::string>               names;  // parallel to mapped[], one entry per material
 };
 
 MaterialManager::MaterialManager(GpuDevice& device)
@@ -59,12 +62,35 @@ MaterialManager::~MaterialManager()
 
 MaterialHandle MaterialManager::add(const GpuMaterial& mat)
 {
+    return add(mat, "");
+}
+
+MaterialHandle MaterialManager::add(const GpuMaterial& mat, std::string_view name)
+{
     ENGINE_ASSERT(impl_->count < kMaxMaterials, "MaterialManager: exceeded kMaxMaterials");
 
     const uint32_t idx = impl_->count++;
     std::memcpy(&impl_->mapped[idx], &mat, sizeof(GpuMaterial));
+    impl_->names.emplace_back(name);
 
     return MaterialHandle{ static_cast<uint16_t>(idx) };
+}
+
+const char* MaterialManager::getName(MaterialHandle handle) const
+{
+    if (!handle.isValid() || handle.index >= impl_->names.size()) return "";
+    return impl_->names[handle.index].c_str();
+}
+
+GpuMaterial* MaterialManager::getMutable(MaterialHandle handle)
+{
+    if (!handle.isValid() || handle.index >= impl_->count) return nullptr;
+    return &impl_->mapped[handle.index];
+}
+
+uint32_t MaterialManager::count() const
+{
+    return impl_->count;
 }
 
 uint64_t MaterialManager::gpuVirtualAddress() const

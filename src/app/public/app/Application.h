@@ -5,6 +5,7 @@
 #include "app/SystemScheduler.h"
 #include <core/diag/Assert.h>
 #include <core/scene/SceneManager.h>
+#include <rendering/MaterialManager.h>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -37,10 +38,11 @@ private:
         std::string      assetPath;
     };
 
-    std::unique_ptr<Engine>                    engine_;
-    std::unique_ptr<physics::PhysicsWorld>     physicsWorld_;
-    std::unique_ptr<rendering::MeshManager>    meshManager_;     // lazy-init inside first frame
-    std::unique_ptr<MeshRenderSystem>          meshRenderSystem_;
+    std::unique_ptr<Engine>                        engine_;
+    std::unique_ptr<physics::PhysicsWorld>         physicsWorld_;
+    std::unique_ptr<rendering::MeshManager>        meshManager_;        // lazy-init inside first frame
+    std::unique_ptr<MeshRenderSystem>              meshRenderSystem_;
+    std::unique_ptr<rendering::MaterialManager>    materialManager_;    // init after GpuDevice ready
     core::scene::SceneManager                  sceneManager_;
     std::vector<PendingMeshLoad>               pendingMeshLoads_;
     SystemScheduler                            scheduler_;

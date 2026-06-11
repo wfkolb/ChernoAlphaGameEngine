@@ -8,6 +8,8 @@
 #include <core/components/AnimationState.h>
 #include <core/components/MeshHandle.h>
 #include <core/components/ColliderComponent.h>
+#include <core/components/SpawnPointComponent.h>
+#include <core/components/TriggerComponent.h>
 #include <core/input/InputReceiverComponent.h>
 
 namespace engine::core::fps {
@@ -44,8 +46,18 @@ void registerFpsArchetypes(EntityFactory& factory) {
 
     factory.registerArchetype("WeaponEntity",     spawnWithTransform);
     factory.registerArchetype("StaticPropEntity", spawnWithTransform);
-    factory.registerArchetype("TriggerEntity",    spawnWithTransform);
-    factory.registerArchetype("SpawnPointEntity", spawnWithTransform);
+
+    factory.registerArchetype("SpawnPointEntity",
+        [](Entity e, const SpawnParams& p, World& w) {
+            w.addComponent<engine::core::Transform>(e, {p.position, p.rotation});
+            w.addComponent<engine::core::SpawnPointComponent>(e, {});
+        });
+
+    factory.registerArchetype("TriggerEntity",
+        [](Entity e, const SpawnParams& p, World& w) {
+            w.addComponent<engine::core::Transform>(e, {p.position, p.rotation});
+            w.addComponent<engine::core::TriggerComponent>(e, {});
+        });
 
     factory.registerArchetype("ProjectileEntity",
         [](Entity e, const SpawnParams& p, World& w) {

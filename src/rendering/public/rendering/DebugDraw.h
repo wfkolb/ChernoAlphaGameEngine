@@ -37,13 +37,25 @@ namespace engine::rendering::DebugDraw {
               std::string_view  str,
               core::math::Vec4  color = {1.0f, 1.0f, 1.0f, 1.0f});
 
-    // Flush all accumulated debug geometry into the frame graph's debug pass.
-    // Called automatically by the DebugFlush system in the PostRender phase.
-    void flush();
+    // Flush all accumulated debug geometry into the active command list.
+    // cmdList     : ID3D12GraphicsCommandList* as void*
+    // viewProj    : row-major 4x4 view-projection matrix (16 floats)
+    // rtvCpuHandle: D3D12_CPU_DESCRIPTOR_HANDLE.ptr of the render target
+    // width/height: render target dimensions in pixels
+    void flush(void*         cmdList,
+               const float   viewProj[16],
+               uint64_t      rtvCpuHandle,
+               uint32_t      width,
+               uint32_t      height);
 
     // Allocate internal CPU buffers. maxPrimitives hard-caps geometry per frame;
     // excess is dropped with a LOG_WARN (once per frame).
     void init(uint32_t maxPrimitives = 65536);
+
+    // Create GPU pipeline state (root signature, PSO, upload buffer).
+    // Call after init() and after the GpuDevice is valid.
+    // d3d12Device: ID3D12Device* as void*
+    void initGpu(void* d3d12Device);
 
     // Release all internal buffers. Call during renderer shutdown.
     void shutdown();

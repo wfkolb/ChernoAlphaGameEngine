@@ -12,13 +12,16 @@ struct OpaquePassPipeline {
 };
 
 // Create the root signature + PSO for the opaque PBR pass.
-// vsBlob / psBlob : compiled shader bytecode (ID3DBlob* cast to void*).
+// vsCode / psCode : raw compiled shader bytecode (e.g. loaded from .cso).
+// vsSize / psSize : byte sizes of vsCode / psCode.
 // backBufferFormat: DXGI_FORMAT as uint32_t (87 = DXGI_FORMAT_R8G8B8A8_UNORM).
 // depthFormat     : DXGI_FORMAT as uint32_t (20 = DXGI_FORMAT_D32_FLOAT).
 OpaquePassPipeline createOpaquePassPipeline(
     ID3D12Device* device,
-    void*         vsBlob,
-    void*         psBlob,
+    const void*   vsCode,
+    size_t        vsSize,
+    const void*   psCode,
+    size_t        psSize,
     uint32_t      backBufferFormat,
     uint32_t      depthFormat);
 

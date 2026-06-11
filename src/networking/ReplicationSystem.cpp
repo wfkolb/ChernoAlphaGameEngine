@@ -1,4 +1,5 @@
 #include <networking/ReplicationSystem.h>
+#include <core/Profiler.h>
 #include <cmath>
 #include <algorithm>
 
@@ -103,6 +104,7 @@ bool ReplicationSystem::tick(engine::core::ecs::World& world, float dt) {
 }
 
 void ReplicationSystem::buildSnapshot(engine::core::ecs::World& world) {
+    PROFILE_SCOPE("ReplicationSystem::buildSnapshot");
     ++seq_;
 
     // Count entities with NetworkIdentity.
@@ -184,6 +186,7 @@ const TransformHistoryEntry* ReplicationSystem::getSnapshotAtTick(
 }
 
 bool ReplicationSystem::decodeHeader(SnapshotHeader& out) const {
+    PROFILE_SCOPE("ReplicationSystem::decodeHeader");
     if (latestData_.size() < 19u) return false;
     ByteReader br(latestData_.data(), latestData_.size());
     out.seq         = br.readU32();

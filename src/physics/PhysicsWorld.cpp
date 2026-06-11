@@ -1,12 +1,15 @@
 #define NOMINMAX
 #include "physics/PhysicsWorld.h"
+#include <core/Profiler.h>
 #include "BroadPhase.h"
 #include "NarrowPhase.h"
 #include "CharacterControllerImpl.h"
 #include <core/log.h>
 #include <core/math/Constants.h>
 #include <core/TaskScheduler.h>
+#include <core/EventBus.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cmath>
 #include <limits>
@@ -50,6 +53,23 @@ struct PhysicsWorld::Impl {
     // Shared thread pool for parallel broad/narrow-phase work.
     engine::core::TaskScheduler scheduler;
 
+    // ── Trigger volume records ────────────────────────────────────────────────
+    struct TriggerBody {
+        core::ecs::Entity entity;
+        core::math::Vec3  center;
+        float             halfX, halfY, halfZ;
+        bool              isSphere;
+        uint8_t           teamFilter;
+        uint32_t          eventTag;
+    };
+    std::vector<TriggerBody>         triggers;
+    // Active overlaps: key = (triggerEntity.index << 32) | dynamicBody.index
+    // Value stores the full Entity pair (including generation) for correct event publication.
+    struct OverlapRecord { Entity triggerEntity; Entity dynamicEntity; };
+    std::unordered_map<uint64_t, OverlapRecord> activeOverlaps;
+
+    core::EventBus* eventBus = nullptr;
+
     BodyData* find(BodyId id) noexcept {
         auto it = idToIndex.find(id);
         return it != idToIndex.end() ? &bodies[it->second] : nullptr;
@@ -80,6 +100,7 @@ struct PhysicsWorld::Impl {
         for (size_t i = 0; i < bodies.size(); ++i) {
             const BodyData& b = bodies[i];
             if (b.isCharacterController) continue;
+            if (!b.collider.enabled) continue;
             if (b.rb.type == RigidBodyType::Static) {
                 internal::BroadEntry e;
                 e.bodyIndex = static_cast<uint32_t>(i);
@@ -240,6 +261,7 @@ bool PhysicsWorld::isGrounded(BodyId id) const {
 // ── Step ──────────────────────────────────────────────────────────────────────
 
 void PhysicsWorld::step(float dt) {
+    PROFILE_SCOPE("PhysicsWorld::step");
     if (impl_->staticDirty) impl_->rebuildStaticBVH();
     impl_->rebuildDynamicGrid();
 
@@ -307,11 +329,13 @@ void PhysicsWorld::step(float dt) {
     };
 
     // Collect the indices of all dynamic bodies once.
+    // Bodies whose collider is disabled are excluded from broad/narrow phase.
     std::vector<size_t> dynIndices;
     dynIndices.reserve(impl_->bodies.size());
     for (size_t i = 0; i < impl_->bodies.size(); ++i) {
         const BodyData& b = impl_->bodies[i];
-        if (!b.isCharacterController && b.rb.type == RigidBodyType::Dynamic)
+        if (!b.isCharacterController && b.rb.type == RigidBodyType::Dynamic
+            && b.collider.enabled)
             dynIndices.push_back(i);
     }
 
@@ -432,6 +456,54 @@ void PhysicsWorld::step(float dt) {
         b.isGrounded = groundedThisFrame;
         internal::updateGroundedState(b.cc, groundedThisFrame, dt);
     }
+
+    // ── Trigger overlap detection ─────────────────────────────────────────────
+    if (impl_->eventBus && !impl_->triggers.empty()) {
+        std::unordered_map<uint64_t, Impl::OverlapRecord> currentOverlaps;
+
+        for (const auto& trigger : impl_->triggers) {
+            for (const auto& body : impl_->bodies) {
+                // Skip non-dynamic bodies and the trigger entity itself.
+                if (body.rb.type != RigidBodyType::Dynamic) continue;
+                if (body.entity == trigger.entity) continue;
+
+                // Overlap test: sphere triggers use halfX as radius;
+                // box triggers use a conservative AABB expansion of 0.3m
+                // (approximates body half-extent without full shape query).
+                const bool overlaps = trigger.isSphere
+                    ? (length(body.position - trigger.center) <= trigger.halfX + 0.5f)
+                    : (std::abs(body.position.x - trigger.center.x) <= trigger.halfX + 0.3f &&
+                       std::abs(body.position.y - trigger.center.y) <= trigger.halfY + 0.3f &&
+                       std::abs(body.position.z - trigger.center.z) <= trigger.halfZ + 0.3f);
+
+                if (!overlaps) continue;
+
+                const uint64_t key =
+                    (static_cast<uint64_t>(trigger.entity.index) << 32) |
+                    static_cast<uint64_t>(body.entity.index);
+                currentOverlaps[key] = { trigger.entity, body.entity };
+
+                // Fire enter event if this is a new overlap.
+                if (impl_->activeOverlaps.find(key) == impl_->activeOverlaps.end()) {
+                    impl_->eventBus->publish(TriggerEnterEvent{
+                        trigger.entity, body.entity, trigger.eventTag });
+                }
+            }
+        }
+
+        // Fire exit events for overlaps that ended this step.
+        for (const auto& [key, rec] : impl_->activeOverlaps) {
+            if (currentOverlaps.find(key) == currentOverlaps.end()) {
+                uint32_t tag = 0;
+                for (const auto& t : impl_->triggers)
+                    if (t.entity == rec.triggerEntity) { tag = t.eventTag; break; }
+                impl_->eventBus->publish(TriggerExitEvent{
+                    rec.triggerEntity, rec.dynamicEntity, tag });
+            }
+        }
+
+        impl_->activeOverlaps = std::move(currentOverlaps);
+    }
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────────
@@ -526,6 +598,49 @@ int PhysicsWorld::overlapSphere(const Vec3& center, float radius,
         if (overlaps) outEntities[count++] = b.entity;
     }
     return count;
+}
+
+// ── Trigger volume management ─────────────────────────────────────────────────
+
+void PhysicsWorld::setEventBus(core::EventBus* bus) noexcept {
+    impl_->eventBus = bus;
+}
+
+void PhysicsWorld::addTrigger(const TriggerDesc& desc) {
+    // Remove any existing entry for this entity first (idempotent).
+    removeTrigger(desc.entity);
+    impl_->triggers.push_back({
+        desc.entity,
+        desc.center,
+        desc.halfX, desc.halfY, desc.halfZ,
+        desc.isSphere,
+        static_cast<uint8_t>(desc.teamFilter),
+        desc.eventTag
+    });
+}
+
+void PhysicsWorld::removeTrigger(Entity entity) {
+    auto& ts = impl_->triggers;
+    ts.erase(
+        std::remove_if(ts.begin(), ts.end(),
+            [entity](const Impl::TriggerBody& t) { return t.entity == entity; }),
+        ts.end());
+    // Clear any active overlaps involving this trigger.
+    for (auto it = impl_->activeOverlaps.begin(); it != impl_->activeOverlaps.end(); ) {
+        if (it->second.triggerEntity.index == entity.index)
+            it = impl_->activeOverlaps.erase(it);
+        else
+            ++it;
+    }
+}
+
+void PhysicsWorld::updateTrigger(Entity entity, const Vec3& newCenter) {
+    for (auto& t : impl_->triggers) {
+        if (t.entity == entity) {
+            t.center = newCenter;
+            return;
+        }
+    }
 }
 
 } // namespace engine::physics

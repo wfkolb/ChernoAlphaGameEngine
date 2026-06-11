@@ -23,11 +23,11 @@ Each `FixedUpdate` on the client:
 3. Store the predicted state `(predictedTick, predictedTransform)` in a circular buffer (ring buffer from `core::containers`).
 4. Send the input message for `predictedTick` to the server.
 
-Prediction buffer depth: `kPredictionBufferDepth = 64` ticks (≈ 2.1 s at 30 Hz). Inputs older than this are dropped.
+Prediction buffer depth: `kPredictionBufferDepth = 64` ticks (≈ 1.0 s at 64 Hz). Inputs older than this are dropped.
 
 ### 1.3 Prediction input message
 
-Sent from client to server in `Update` phase (60 Hz, not 30 Hz — input is sampled every rendered frame for lower latency):
+Sent from client to server in `Update` phase (at render rate, not 64 Hz — input is sampled every rendered frame for lower latency):
 
 ```cpp
 struct InputMessage {
@@ -103,13 +103,13 @@ When a client fires a hitscan weapon (a ray cast for hit detection), the client 
 ### 3.2 Rewind window
 
 ```cpp
-constexpr uint32_t kRewindWindowTicks  = 6;    // at 30 Hz = 200 ms
-constexpr uint32_t kMaxRewindTicks     = 6;    // hard cap; cannot rewind more than this
+constexpr uint32_t kRewindWindowTicks  = 13;   // at 64 Hz ≈ 200 ms
+constexpr uint32_t kMaxRewindTicks     = 13;   // hard cap; cannot rewind more than this
 ```
 
-`kRewindWindowTicks = 6` is the default maximum rewind. It is configurable via `[network].rewindWindowTicks` but cannot exceed `kMaxRewindTicks` (a hard cap to prevent abuse). Typical use: set to the client's measured round-trip latency in ticks, clamped to the window.
+`kRewindWindowTicks = 13` is the default maximum rewind. It is configurable via `[network].rewindWindowTicks` but cannot exceed `kMaxRewindTicks` (a hard cap to prevent abuse). Typical use: set to the client's measured round-trip latency in ticks, clamped to the window.
 
-At 30 Hz, 6 ticks = 200 ms. This matches the scope-networking.md requirement.
+At 64 Hz, 13 ticks ≈ 203 ms. This matches the scope-networking.md requirement of ≤ 200 ms rewind window.
 
 ### 3.3 Server history buffer
 
@@ -172,7 +172,7 @@ Each non-owned replicated entity maintains an interpolation buffer: a ring of th
 
 ### 4.2 Render time vs. simulation time
 
-The client renders entities at a deliberate **render time** = `currentServerTime - kInterpolationDelay`. The default `kInterpolationDelay = 2` ticks (≈ 67 ms at 30 Hz). This ensures there are usually two snapshots to interpolate between.
+The client renders entities at a deliberate **render time** = `currentServerTime - kInterpolationDelay`. The default `kInterpolationDelay = 2` ticks (≈ 31 ms at 64 Hz). This ensures there are usually two snapshots to interpolate between.
 
 The delay is configurable: `[network].interpolationDelayTicks`. Higher delay = smoother interpolation at the cost of more visual latency for remote entities.
 

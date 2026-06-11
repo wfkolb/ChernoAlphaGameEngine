@@ -1,8 +1,9 @@
-﻿// Must be first â€” ensures Winsock is included before <windows.h>.
+﻿// Must be first â€" ensures Winsock is included before <windows.h>.
 #include "WinsockInclude.h"
 
 #include "networking/ReliableChannel.h"
 #include <core/diag/Assert.h>
+#include <core/time/Clock.h>
 
 #include <algorithm>
 #include <cstring>
@@ -10,16 +11,12 @@
 namespace engine::networking {
 
 // ---------------------------------------------------------------------------
-// nowMs â€” monotonic millisecond clock via QPC
+// nowMs â€" monotonic millisecond clock via Clock abstraction
 // ---------------------------------------------------------------------------
 
 uint64_t ReliableChannel::nowMs() {
-    LARGE_INTEGER freq{};
-    LARGE_INTEGER counter{};
-    ::QueryPerformanceFrequency(&freq);
-    ::QueryPerformanceCounter(&counter);
-    // Avoid overflow: divide counter by freq first, then scale remainder.
-    return static_cast<uint64_t>(counter.QuadPart * 1000LL / freq.QuadPart);
+    // Clock::now() returns nanoseconds; divide by 1,000,000 to get milliseconds.
+    return engine::core::time::Clock::now() / 1'000'000u;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +73,7 @@ bool ReliableChannel::send(std::span<const uint8_t> payload) {
 
 void ReliableChannel::updateAckState(uint16_t seq) {
     if (seq == recvSequence_) {
-        // Duplicate of the current highest â€” ignore (already tracked).
+        // Duplicate of the current highest â€" ignore (already tracked).
         return;
     }
 
@@ -90,12 +87,12 @@ void ReliableChannel::updateAckState(uint16_t seq) {
             // Shift bitfield left by diff bits; bit (diff-1) represents the old recvSequence_.
             recvAckBitfield_ = (recvAckBitfield_ << diff) | (1u << (diff - 1));
         } else {
-            // Gap is larger than the bitfield can represent â€” clear it entirely.
+            // Gap is larger than the bitfield can represent â€" clear it entirely.
             recvAckBitfield_ = 0;
         }
         recvSequence_ = seq;
     } else {
-        // seq is older than recvSequence_ â€” mark its bit in the bitfield.
+        // seq is older than recvSequence_ â€" mark its bit in the bitfield.
         // bit N represents recvSequence_ - N - 1, so seq maps to bit (recvSequence_ - seq - 1).
         const uint16_t age = static_cast<uint16_t>(recvSequence_ - seq);
         if (age >= 1 && age <= kAckBitfieldBits) {

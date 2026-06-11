@@ -1,5 +1,6 @@
 add_executable(input_tests
     InputSystemTests.cpp
+    XInputTests.cpp
 )
 
 target_link_libraries(input_tests

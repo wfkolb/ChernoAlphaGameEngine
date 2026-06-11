@@ -13,6 +13,8 @@
     "gtest",
     "benchmark",
     "tomlplusplus",
-    "lz4"
+    "lz4",
+    "imguizmo",
+    "stb"
   ]
 }

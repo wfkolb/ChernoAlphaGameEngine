@@ -1,10 +1,12 @@
-﻿// Must be first â€” ensures Winsock is included before <windows.h>.
+﻿// Must be first â€" ensures Winsock is included before <windows.h>.
 #include "WinsockInclude.h"
 
 #include "networking/Session.h"
+#include "networking/PacketObfuscation.h"
 #include <core/diag/Assert.h>
 
 #include <cstring>
+#include <vector>
 
 namespace engine::networking {
 
@@ -68,6 +70,11 @@ std::pair<Session, Session> Session::createLocalPair(uint16_t basePort) {
 bool Session::send(const Endpoint& /*to*/, std::span<const uint8_t> data) {
     ENGINE_ASSERT(channel_ != nullptr, "Session::send called on uninitialised session");
     // Point-to-point in v1: the channel already knows its remote; ignore 'to'.
+    if (!obfuscationKey_.empty()) {
+        std::vector<uint8_t> obfuscated(data.begin(), data.end());
+        xorObfuscate(std::span<uint8_t>(obfuscated), obfuscationKey_);
+        return channel_->send(obfuscated);
+    }
     return channel_->send(data);
 }
 
@@ -77,7 +84,16 @@ bool Session::send(const Endpoint& /*to*/, std::span<const uint8_t> data) {
 
 void Session::poll() {
     ENGINE_ASSERT(channel_ != nullptr, "Session::poll called on uninitialised session");
-    channel_->poll(onMessage_);
+    if (!obfuscationKey_.empty()) {
+        // Deobfuscate received bytes before passing them to the application callback.
+        channel_->poll([this](const Endpoint& ep, std::span<const uint8_t> raw) {
+            std::vector<uint8_t> deobfuscated(raw.begin(), raw.end());
+            xorObfuscate(std::span<uint8_t>(deobfuscated), obfuscationKey_);
+            if (onMessage_) onMessage_(ep, deobfuscated);
+        });
+    } else {
+        channel_->poll(onMessage_);
+    }
 }
 
 // ---------------------------------------------------------------------------

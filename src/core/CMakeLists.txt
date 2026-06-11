@@ -20,3 +20,6 @@ engine_add_warnings(engine_core)
 # tomlplusplus is header-only; link it so vcpkg exposes the include path.
 find_package(tomlplusplus CONFIG REQUIRED)
 target_link_libraries(engine_core PUBLIC tomlplusplus::tomlplusplus)
+
+# XInput 1.4 — gamepad polling in Input.cpp.
+target_link_libraries(engine_core PRIVATE Xinput.lib)

@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 #include <tools/AssetImporter.h>
+#include "editor/FileDialog.h"
 
 #include <algorithm>
 #include <cctype>
@@ -20,6 +21,8 @@ AssetBrowserPanel::AssetType AssetBrowserPanel::classify(const fs::path& p) {
     if (ext == ".scene")                return AssetType::Scene;
     if (ext == ".glb" || ext == ".gltf") return AssetType::Gltf;
     if (ext == ".prefab")               return AssetType::Prefab;
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga")
+                                        return AssetType::Texture;
     return AssetType::Unknown;
 }
 
@@ -63,8 +66,9 @@ const char* typeLabel(AssetBrowserPanel::AssetType t) {
         case AssetBrowserPanel::AssetType::Easset:  return "[MESH] ";
         case AssetBrowserPanel::AssetType::Scene:   return "[SCENE] ";
         case AssetBrowserPanel::AssetType::Gltf:    return "[GLB] ";
-        case AssetBrowserPanel::AssetType::Prefab:  return "[PREFAB] ";
-        default:                                    return "";
+        case AssetBrowserPanel::AssetType::Prefab:   return "[PREFAB] ";
+        case AssetBrowserPanel::AssetType::Texture:  return "[TEX] ";
+        default:                                     return "";
     }
 }
 } // anonymous namespace
@@ -138,13 +142,27 @@ void AssetBrowserPanel::draw(bool* open) {
 
     if (ImGui::Button("Refresh")) refresh();
     ImGui::SameLine();
+    if (ImGui::Button("Import...")) {
+        const fs::path picked = FileDialog::openFile(
+            L"glTF / GLB Files\0*.glb;*.gltf\0All Files\0*.*\0",
+            L"Import Mesh");
+        if (!picked.empty() && classify(picked) == AssetType::Gltf) {
+            pendingImportPath_ = picked;
+            importSettings_    = AssetImportSettings{};
+            importModalOpen_   = true;
+        }
+    }
+    ImGui::SameLine();
     ImGui::TextDisabled("%s", root_.empty() ? "(no content root)" : root_.string().c_str());
 
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##assetfilter", "Filter", filter_, sizeof(filter_));
     ImGui::Separator();
 
-    if (ImGui::BeginChild("##assetlist")) {
+    const float contentWidth = ImGui::GetContentRegionAvail().x;
+
+    // Left column: file list (65% of width).
+    if (ImGui::BeginChild("##assetlist", ImVec2(contentWidth * 0.65f, 0))) {
         for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
             const Entry& e = entries_[i];
             if (filter_[0] != '\0' && e.displayName.find(filter_) == std::string::npos) {
@@ -161,6 +179,25 @@ void AssetBrowserPanel::draw(bool* open) {
                     if (e.type == AssetType::Scene  && onOpenScene_)  onOpenScene_(e.path);
                     if (e.type == AssetType::Gltf   && onImport_)     onImport_(e.path);
                     if (e.type == AssetType::Prefab && onInstPrefab_) onInstPrefab_(e.path);
+                } else {
+                    if (e.type == AssetType::Easset && onPreview_)    onPreview_(e.path);
+                }
+            }
+            // Drag source for .easset files (used by inspector texture slot drop targets).
+            if (e.type == AssetType::Easset) {
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    const std::string pathStr = e.path.string();
+                    ImGui::SetDragDropPayload("ASSET_PATH", pathStr.c_str(), pathStr.size() + 1);
+                    ImGui::Text("%s", e.displayName.c_str());
+                    ImGui::EndDragDropSource();
+                }
+            }
+            // Right-click context menu for texture source files.
+            if (e.type == AssetType::Texture) {
+                if (ImGui::BeginPopupContextItem("##texctx")) {
+                    if (ImGui::MenuItem("Import Texture") && onImportTexture_)
+                        onImportTexture_(e.path);
+                    ImGui::EndPopup();
                 }
             }
             ImGui::PopID();
@@ -182,7 +219,16 @@ void AssetBrowserPanel::draw(bool* open) {
         ImGui::EndDragDropTarget();
     }
 
-    // Draw the modal after the child window so it can be centred over the full viewport.
+    // Right column: inline asset preview (remaining width).
+    ImGui::SameLine();
+    if (ImGui::BeginChild("##assetpreview", ImVec2(0, 0))) {
+        if (previewDrawFn_) {
+            previewDrawFn_(ImGui::GetContentRegionAvail());
+        }
+    }
+    ImGui::EndChild();
+
+    // Draw the modal after the child windows so it can be centred over the full viewport.
     drawImportModal();
 
     ImGui::End();

@@ -34,4 +34,11 @@ ImportResult importGltf(const std::filesystem::path& source,
                         const std::filesystem::path& output,
                         const ImportSettings&        settings = {});
 
+// Import a PNG/JPG/TGA image as a texture-only .easset.
+// source : path to the source image file (.png, .jpg, .tga, etc.)
+// output : path to the output .easset file
+// Returns ImportResult with ok=true on success.
+ImportResult importPng(const std::filesystem::path& source,
+                       const std::filesystem::path& output);
+
 } // namespace engine::tools

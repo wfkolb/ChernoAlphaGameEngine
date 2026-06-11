@@ -3,6 +3,8 @@ add_executable(app_tests
     GameLoopTests.cpp
     DamageSystemTests.cpp
     CameraIntegrationTests.cpp
+    TriggerCallbackTests.cpp
+    SpawnExclusionTests.cpp
 )
 
 target_link_libraries(app_tests

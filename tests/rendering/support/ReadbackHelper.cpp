@@ -41,11 +41,13 @@ std::vector<RGBA8> readbackBackBuffer(GpuDevice& device, int x, int y, int w, in
         IID_PPV_ARGS(&readbackBuf));
     if (FAILED(hr)) return {};
 
-    // Transition back buffer: PRESENT → COPY_SOURCE
+    // Transition back buffer: RENDER_TARGET → COPY_SOURCE
+    // readbackBackBuffer is called while a beginFrame/endFrame pair is open,
+    // so the back buffer is in RENDER_TARGET state (set by beginFrame).
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource   = backBuffer;
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     cmdList->ResourceBarrier(1, &barrier);
@@ -70,8 +72,9 @@ std::vector<RGBA8> readbackBackBuffer(GpuDevice& device, int x, int y, int w, in
                    static_cast<UINT>(x + w), static_cast<UINT>(y + h), 1 };
     cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
 
-    // Transition back: COPY_SOURCE → PRESENT
-    std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+    // Transition back: COPY_SOURCE → RENDER_TARGET so endFrame()'s RT→PRESENT is correct.
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
     cmdList->ResourceBarrier(1, &barrier);
 
     // Execute and wait

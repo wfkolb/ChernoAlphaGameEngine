@@ -203,7 +203,7 @@ GpuDevice GpuDevice::create(const Desc& desc) {
 
         D3D12_CLEAR_VALUE clearVal   = {};
         clearVal.Format              = DXGI_FORMAT_D32_FLOAT;
-        clearVal.DepthStencil.Depth  = 1.0f;
+        clearVal.DepthStencil.Depth  = 0.0f;  // reverse-Z: far plane = 0
         clearVal.DepthStencil.Stencil = 0;
 
         ENGINE_HR(impl->device->CreateCommittedResource(
@@ -298,7 +298,7 @@ void GpuDevice::beginFrame() {
             dd.Flags                  = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
             D3D12_CLEAR_VALUE cv      = {};
             cv.Format                 = DXGI_FORMAT_D32_FLOAT;
-            cv.DepthStencil.Depth     = 1.0f;
+            cv.DepthStencil.Depth     = 0.0f;  // reverse-Z: far plane = 0
             ENGINE_HR(impl_->device->CreateCommittedResource(
                 &hp, D3D12_HEAP_FLAG_NONE, &dd,
                 D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv,

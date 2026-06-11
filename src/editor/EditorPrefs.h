@@ -32,9 +32,12 @@ public:
     uint16_t piePort() const noexcept { return piePort_; }
     void     setPiePort(uint16_t p) noexcept { piePort_ = p; }
 
+    bool pieMouseCapture() const noexcept { return pieMouseCapture_; }
+
 private:
     std::vector<std::filesystem::path> recentScenes_;
-    uint16_t                           piePort_ = kDefaultPIEPort;
+    uint16_t                           piePort_          = kDefaultPIEPort;
+    bool                               pieMouseCapture_  = true;
 };
 
 } // namespace engine::editor

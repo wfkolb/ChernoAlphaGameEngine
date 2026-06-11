@@ -1,6 +1,6 @@
 # Rendering: Mesh, Material, and Shader Pipeline
 
-Status: Approved (Phase 2)
+Status: Updated (Phase 10)
 Owner: Rendering Lead
 Task: #8
 References: architecture.md §2 §5, rendering-frame-graph.md, scope-rendering.md, tools-build-and-asset-pipeline.md
@@ -57,7 +57,7 @@ struct VSInput_Static {
 
 ### 1.3 Skinned mesh (`VERTEX_LAYOUT_SKINNED`)
 
-Extends static mesh with bone indices and weights. Out-of-scope for v1 animation, but the layout is defined now so the asset format is forward-compatible.
+Pipeline stub implemented in Phase 10 (R7). Extends static mesh with bone indices and weights.
 
 ```cpp
 struct VertexSkinned {
@@ -67,6 +67,8 @@ struct VertexSkinned {
 };
 // Total: 36 bytes/vertex
 ```
+
+`MeshManager::uploadSkinned()` accepts `VertexSkinned` vertices and a bind-pose matrix array. The shader `shaders/skinned/SkinnedVS.hlsl` samples a per-draw `StructuredBuffer<row_major float4x4> gBones` supporting up to 256 bones. `MeshRenderSystem` selects the skinned PSO when `isSkinned(handle) && hasComponent<AnimationState>(e)`. Actual bone animation data is populated by a future animation phase.
 
 ### 1.4 Index buffer
 
@@ -182,6 +184,8 @@ engine/shaders/
 ├── shadow/
 │   ├── ShadowVS.hlsl
 │   └── ShadowPS.hlsl
+├── skinned/
+│   └── SkinnedVS.hlsl         — bone palette skinning (up to 256 bones via StructuredBuffer)
 └── debug/
     ├── DebugLineVS.hlsl
     └── DebugLinePS.hlsl
@@ -261,6 +265,20 @@ constexpr MeshHandle kInvalidMesh{ 0xFFFF'FFFFu };
 ```
 
 A `MeshHandle` identifies a (vertex buffer, index buffer, vertex layout, index count, AABB) tuple stored in the renderer's mesh registry.
+
+**ECS component (`core::MeshHandle`, ID 12):** The ECS component that entities carry is distinct from the renderer's `MeshHandle` struct above. As of Phase 10 (A3), `core::MeshHandle` carries:
+
+```cpp
+struct MeshHandle {
+    std::string  assetPath;
+    uint32_t     materialIndex { 0 };
+    bool         castShadow    { true };
+    bool         receiveShadow { true };
+    uint8_t      _pad[2]       {};
+};
+```
+
+The `rendering::Renderable` (non-ECS) struct is unchanged.
 
 ---
 

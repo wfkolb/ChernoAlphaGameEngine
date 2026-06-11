@@ -44,6 +44,7 @@ struct Collider {
     uint8_t layerIndex    = 0;
     uint8_t materialIndex = 0;
     bool    isTrigger     = false;
+    bool    enabled       = true;
 };
 
 } // namespace engine::physics

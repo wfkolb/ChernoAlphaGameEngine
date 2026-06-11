@@ -223,9 +223,9 @@ Maps `v` linearly onto `[0, (1<<bits) - 1]`. Useful for clamped floats (health 0
 
 ## 6. Per-Connection Bandwidth Budget
 
-Target: ≤ 200 KB/s per client at 30 Hz with 1000 replicated entities.
+Target: ≤ 200 KB/s per client at 64 Hz with 1000 replicated entities.
 
-At 30 Hz, that is ≤ 6667 bytes per tick per client. Budget allocation:
+At 64 Hz, that is ≤ 3125 bytes per tick per client. Budget allocation:
 
 | Content | Max bytes/tick |
 |---|---|

@@ -13,6 +13,12 @@ namespace engine::editor {
 bool drawColliderWidget(core::ColliderComponent& c) {
     bool changed = false;
 
+    // ── Enable / disable toggle ──────────────────────────────────────────────
+    if (ImGui::Checkbox("Enabled", &c.enabled))
+        changed = true;
+
+    ImGui::Separator();
+
     // ── Shape selector ───────────────────────────────────────────────────────
     static const char* kShapeNames[] = { "Box", "Sphere", "Capsule" };
     int shapeIdx = static_cast<int>(c.shape);

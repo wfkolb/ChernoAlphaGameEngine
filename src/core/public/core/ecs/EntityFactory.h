@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace engine::core::ecs {
 
@@ -22,6 +23,9 @@ public:
 
     void   registerArchetype(std::string name, ArchetypeFn fn);
     Entity spawn(const std::string& name, const SpawnParams& params, World& world) const;
+
+    // Returns archetype names sorted alphabetically.
+    std::vector<std::string> registeredArchetypeNames() const;
 
 private:
     std::unordered_map<std::string, ArchetypeFn> archetypes_;

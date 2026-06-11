@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    name: CI / build (${{ matrix.config }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.config }}-
+
+      - name: Install vcpkg dependencies
+        run: |
+          if (Test-Path "vcpkg_installed") {
+            Write-Host "vcpkg cache restored"
+          }
+          cmake --preset ${{ matrix.config == 'Debug' && 'debug' || 'release' }} --fresh 2>&1 | Select-Object -Last 20
+        shell: pwsh
+
+      - name: Configure (${{ matrix.config }})
+        run: cmake --preset ${{ matrix.config == 'Debug' && 'debug' || 'release' }}
+        shell: pwsh
+
+      - name: Build (${{ matrix.config }})
+        run: cmake --build --preset build-${{ matrix.config == 'Debug' && 'debug' || 'release' }}
+        shell: pwsh
+
+      - name: Run unit tests (${{ matrix.config }})
+        working-directory: build/${{ matrix.config == 'Debug' && 'debug' || 'release' }}
+        run: ctest -L unit --output-on-failure
+        shell: pwsh
+
+      - name: clang-format check
+        if: matrix.config == 'Debug'
+        shell: bash
+        run: cmake --build --preset build-debug --target clang-format-check
+
+      - name: clang-tidy
+        if: matrix.config == 'Debug'
+        continue-on-error: true
+        shell: bash
+        run: cmake --build --preset build-debug --target clang-tidy
+
+  integration-tests:
+    name: CI / integration tests
+    runs-on: self-hosted
+    continue-on-error: true
+    needs: build
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (Debug)
+        run: cmake --preset debug
+        shell: pwsh
+
+      - name: Build (Debug)
+        run: cmake --build --preset build-debug
+        shell: pwsh
+
+      - name: Run integration tests
+        working-directory: build/debug
+        run: ctest -L integration --output-on-failure
+        shell: pwsh
+
+      - name: Run GPU benchmarks
+        working-directory: build/debug
+        run: ctest -L gpu --output-on-failure
+        continue-on-error: true
+        shell: pwsh

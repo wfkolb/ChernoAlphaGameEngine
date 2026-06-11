@@ -26,6 +26,15 @@ public:
         bool  sprint         = false;   // Shift
     };
 
+    // Full camera state snapshot for save/restore around PIE sessions.
+    struct State {
+        core::math::Vec3 focus;
+        core::math::Vec3 position;
+        float yaw;
+        float pitch;
+        float distance;
+    };
+
     void update(const Input& in, float dt);
 
     // Re-center on a point and (optionally) pull the camera to a framing distance.
@@ -38,6 +47,15 @@ public:
     core::math::Mat4 viewMatrix() const;
     core::math::Vec3 position() const { return position_; }
     core::math::Vec3 focus() const { return focus_; }
+
+    State save() const noexcept { return { focus_, position_, yaw_, pitch_, distance_ }; }
+    void  restore(const State& s) noexcept {
+        focus_    = s.focus;
+        position_ = s.position;
+        yaw_      = s.yaw;
+        pitch_    = s.pitch;
+        distance_  = s.distance;
+    }
 
     float fovYDegrees = 60.0f;
     float nearZ       = 0.05f;
